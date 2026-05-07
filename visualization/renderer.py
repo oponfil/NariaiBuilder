@@ -270,17 +270,20 @@ class UniverseRenderer:
         self.show_info = True
         self.show_horizons = True
         
-        # Состояние паузы
-        self.paused = False
+        # Состояние паузы (запускаем симуляцию на паузе по умолчанию)
+        self.paused = True
         # На паузе стрелки сдвигают t и a(t); один шаг физики за кадр
         # (иначе step_matter_simulation на паузе выходит сразу).
         self._manual_cosmic_step_this_frame = False
         self._manual_cosmic_dt_signed: float | None = None
         
         # Симуляция материи (все расчеты и логика вынесены сюда)
-        print("[DEBUG] UniverseRenderer.__init__: creating MatterSimulation...")
-        self.matter_simulation = MatterSimulation()
-        print("[DEBUG] UniverseRenderer.__init__: MatterSimulation created")
+        print("[DEBUG] UniverseRenderer.__init__: creating MatterSimulations...")
+        self.matter_simulations = {
+            "spiral": MatterSimulation(mode="spiral"),
+            "uniform": MatterSimulation(mode="uniform")
+        }
+        print("[DEBUG] UniverseRenderer.__init__: MatterSimulations created")
         
         # Калькулятор масс
         print("[DEBUG] UniverseRenderer.__init__: creating MassCalculator...")
@@ -326,6 +329,22 @@ class UniverseRenderer:
         
         print("[DEBUG] UniverseRenderer.__init__: initialization complete!")
 
+    def reset(self):
+        """Сброс состояния рендерера и симуляции к начальному."""
+        self.paused = True
+        self.matter_simulations = {
+            "spiral": MatterSimulation(mode="spiral"),
+            "uniform": MatterSimulation(mode="uniform")
+        }
+        self.mass_calculator = MassCalculator()
+        self._cached_physical_points = None
+        self._cached_distances = None
+        self._cached_time = None
+        self._cached_scale_factor = None
+        self._cached_scale_ratio = None
+        self._cached_distances_squared = None
+        self.invalidate_mass_cache()
+
     def _black_hole_color_for_mass(self, mass_kg: float) -> tuple:
         """Цвет ЧД: зеленый, когда масса достигла порога Нараи."""
         if float(mass_kg) >= NARIAI_BLACK_HOLE_MASS_KG:
@@ -351,6 +370,14 @@ class UniverseRenderer:
         self.draw_horizons(universe, cosmology, masses)
         self.draw_central_black_hole_point(masses)
         self.draw_info_panel(universe, cosmology, fps, masses=masses)
+
+    @property
+    def matter_simulation(self):
+        import config
+        mode = getattr(config, "MATTER_INITIAL_DISTRIBUTION", "spiral").strip().lower()
+        if mode not in self.matter_simulations:
+            mode = "spiral"
+        return self.matter_simulations[mode]
 
     # ОБРАТНАЯ СОВМЕСТИМОСТЬ: Property-делегаты для доступа к данным из matter_simulation
     # Это позволяет старому коду работать без изменений
@@ -514,7 +541,7 @@ class UniverseRenderer:
         комовинг-линейки, при a>1 короче.
         """
         TEN_BILLION_LY = get_ten_billion_ly()
-        ref_px = int(ui.RULER_LENGTH_PX)
+        ref_px = int(ui.RULER_LENGTH_PX * self.zoom)
         lw = max(1, int(ui.HORIZON_LINE_WIDTH))
         tick = int(ui.RULER_TICK_HEIGHT)
         label_pad = 5
@@ -687,10 +714,10 @@ class UniverseRenderer:
                 """Масштабировать физический радиус в пиксели относительно фиксированной шкалы"""
                 if physical_radius <= 0 or physical_radius >= float('inf'):
                     return 0
-                # 10 млрд св. лет = RULER_LENGTH_PX пикселей.
+                # 10 млрд св. лет = RULER_LENGTH_PX пикселей. Учитываем также self.zoom
                 # В режиме "comoving" делим на a, чтобы перейти в сопутствующие.
                 display_radius = physical_radius / display_a if is_comoving_display() else physical_radius
-                pixels = (display_radius / TEN_BILLION_LY) * RULER_LENGTH_PX
+                pixels = (display_radius / TEN_BILLION_LY) * RULER_LENGTH_PX * self.zoom
                 radius_int = int(pixels)
                 # ВАЖНО: Ограничиваем максимальный радиус, чтобы pygame.draw.circle не зависал
                 # Максимальный радиус = диагональ экрана + запас
@@ -976,10 +1003,11 @@ class UniverseRenderer:
         Вызывается ровно один раз в начале draw() — до calculate_masses(),
         чтобы массы и радиусы соответствовали уже обновлённому состоянию.
         """
-        if not self.collapse_started:
-            self.initialize_matter_points(universe, cosmology)
-        elif not self.matter_simulation.matter_points_initialized:
-            self.initialize_matter_points(universe, cosmology)
+        for sim in self.matter_simulations.values():
+            if not sim.collapse_started:
+                sim.initialize_matter_points(universe, cosmology)
+            elif not sim.matter_points_initialized:
+                sim.initialize_matter_points(universe, cosmology)
 
         manual_cosmic = self._manual_cosmic_step_this_frame
         dt_signed = self._manual_cosmic_dt_signed
@@ -998,13 +1026,14 @@ class UniverseRenderer:
                 r_black_hole = None
 
         physics_paused = self.paused and not manual_cosmic
-        self.matter_simulation.update_collapse(
-            universe,
-            cosmology,
-            physics_paused,
-            r_black_hole,
-            dt_step_signed=(dt_signed if manual_cosmic else None),
-        )
+        for sim in self.matter_simulations.values():
+            sim.update_collapse(
+                universe,
+                cosmology,
+                physics_paused,
+                r_black_hole,
+                dt_step_signed=(dt_signed if manual_cosmic else None),
+            )
 
         # Состояние материи изменилось — сбрасываем кэш масс, чтобы первый
         # calculate_masses в кадре пересчитал.
@@ -1012,8 +1041,9 @@ class UniverseRenderer:
         self._cached_masses_key = None
     
     def initialize_matter_points(self, universe, cosmology):
-        """Инициализация точек материи. ДЕЛЕГИРУЕТ к matter_simulation."""
-        self.matter_simulation.initialize_matter_points(universe, cosmology)
+        """Инициализация точек материи. ДЕЛЕГИРУЕТ ко всем matter_simulations."""
+        for sim in self.matter_simulations.values():
+            sim.initialize_matter_points(universe, cosmology)
     
     def draw_info_panel(self, universe, cosmology, fps: float, masses=None):
         """Только текстовая панель. ДЕЛЕГИРУЕТ к info_panel."""
@@ -1025,12 +1055,9 @@ class UniverseRenderer:
         return self.matter_simulation.generate_points_in_3d_sphere(num_points, radius, seed)
     
     def _add_matter_points(self, universe, cosmology, num_new_points: int, radius_physical: float):
-        """Добавление новых точек материи. ДЕЛЕГИРУЕТ к matter_simulation."""
-        self.matter_simulation.add_matter_points(universe, cosmology, num_new_points, radius_physical)
-    
-    def initialize_matter_points(self, universe, cosmology):
-        """Инициализация точек материи. ДЕЛЕГИРУЕТ к matter_simulation."""
-        self.matter_simulation.initialize_matter_points(universe, cosmology)
+        """Добавление новых точек материи. ДЕЛЕГИРУЕТ ко всем matter_simulations."""
+        for sim in self.matter_simulations.values():
+            sim.add_matter_points(universe, cosmology, num_new_points, radius_physical)
     
     def draw_density_points(self, universe, cosmology, masses=None):
         """
@@ -1078,7 +1105,7 @@ class UniverseRenderer:
         RULER_LENGTH_PX = ui.RULER_LENGTH_PX
         # Максимальное "экранное" расстояние в единицах отображения
         # (физических — в режиме "physical", комовинг — в режиме "comoving").
-        max_screen_display = max(self.width, self.height) * TEN_BILLION_LY / RULER_LENGTH_PX
+        max_screen_display = max(self.width, self.height) * TEN_BILLION_LY / (RULER_LENGTH_PX * self.zoom)
         if is_comoving_display():
             # 1 пиксель = (TEN_BILLION_LY/RULER_LENGTH_PX) комовинг-метров →
             # max_visible в комовинге равен max_screen_display напрямую.
@@ -1139,7 +1166,7 @@ class UniverseRenderer:
         center_y = self.height // 2  # Центр экрана (тот же, что используется для горизонтов)
         
         # ОПТИМИЗАЦИЯ: Вычисляем максимальный физический радиус, видимый на экране
-        scale_to_physical = TEN_BILLION_LY / RULER_LENGTH_PX
+        scale_to_physical = TEN_BILLION_LY / (RULER_LENGTH_PX * self.zoom)
         max_display_dist = max(self.width, self.height) * scale_to_physical
         # distances_in_circle — физические; в режиме комовинг 1 пиксель соответствует
         # большему физическому расстоянию (в `a` раз), поэтому max-radius умножается на a.
@@ -1174,7 +1201,7 @@ class UniverseRenderer:
                     print("[DEBUG] Points shuffled randomly to eliminate ordering artifacts")
             
             # ОПТИМИЗАЦИЯ: Вычисляем масштаб один раз и используем in-place операции
-            scale_to_px = RULER_LENGTH_PX / TEN_BILLION_LY
+            scale_to_px = (RULER_LENGTH_PX * self.zoom) / TEN_BILLION_LY
             # В режиме "comoving" делим физические координаты на a(t),
             # чтобы получить отображение в сопутствующих координатах:
             #   r_phys = a · χ ⇒ x_px = (r_phys / a) · scale_to_px = χ · scale_to_px.
@@ -1581,7 +1608,7 @@ class UniverseRenderer:
             return
 
         TEN_BILLION_LY = get_ten_billion_ly()
-        scale_to_px = ui.RULER_LENGTH_PX / TEN_BILLION_LY
+        scale_to_px = (ui.RULER_LENGTH_PX * self.zoom) / TEN_BILLION_LY
         # В режиме "comoving" делим все физические радиусы на a(t) при отрисовке.
         if is_comoving_display() and scale_factor > 0:
             display_scale_to_px = scale_to_px / float(scale_factor)

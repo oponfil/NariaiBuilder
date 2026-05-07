@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from utils.constants import c
+import config
 
 
 def laser_mass_floor(start_mass_kg, efficiency: float):
@@ -25,11 +26,13 @@ def laser_mass_floor(start_mass_kg, efficiency: float):
 
 def burnable_mass_kg(current_mass_kg, mass_floor_kg):
     """Масса, доступная для преобразования в лазерное излучение."""
-    return np.maximum(
-        np.asarray(current_mass_kg, dtype=np.float64)
-        - np.asarray(mass_floor_kg, dtype=np.float64),
-        0.0,
-    )
+    burnable = np.asarray(current_mass_kg, dtype=np.float64) - np.asarray(mass_floor_kg, dtype=np.float64)
+    # Отсечка: из-за экспоненциального закона масса затухает асимптотически.
+    # Если оставшаяся сжигаемая масса ничтожно мала (меньше 10^-5 от массы остатка),
+    # принудительно обнуляем её, чтобы остановить генерацию бесконечного числа микро-фотонов.
+    # Порог: приравниваем к массе остатка, как просил пользователь
+    threshold = np.asarray(mass_floor_kg, dtype=np.float64)
+    return np.where(burnable > threshold, burnable, 0.0)
 
 
 def emitted_rest_mass_for_step(

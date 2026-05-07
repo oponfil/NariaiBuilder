@@ -18,7 +18,7 @@ LASER_START_TIME_YEARS = 7.0e9  # 13.8 млрд лет
 # Точки пылевой материи
 # =============================================================================
 # "uniform" — равномерно в шаре; "spiral" — спираль в плоскости XY (см. matter_simulation)
-MATTER_INITIAL_DISTRIBUTION = "spiral" # "spiral" | "uniform"
+MATTER_INITIAL_DISTRIBUTION = "uniform" # "spiral" | "uniform"
 # Число точек; масса точки — utils.config_utils.get_mass_per_point_kg()
 MATTER_NUM_POINTS = 1000
 # Размер маркера точки материи на экране (px)
@@ -43,20 +43,22 @@ COORDINATE_DISPLAY_MODE = "physical"  # "physical" | "comoving"
 # F = P/c, a_thrust = P/(c·m), dm/dt = −(Вт/кг)·m/c², dM_bh = (P·dt/c²)·a/a_emit, a_grav = G·M_BH/r².
 # Для сравнения: предел Эддингтора — порядка 6.3 Вт/кг (ионизованный H, Томсон).
 # 0 — лазер выключен.
-MATTER_THRUST_POWER_PER_KG_W = 5000.0
+MATTER_THRUST_POWER_PER_KG_W = 500.0
 # Эмиттеры выбираются автоматически: точки с χ < χ_event(t_collapse), где
 # χ_event — комовинг-радиус cosmological event horizon в момент включения лазера.
 # Фотон из точки за этим горизонтом не может достичь ЦЧД (расширение уносит его
 # быстрее, чем он движется к центру), поэтому такая точка эмиттером не делается.
 # Маркер лазерного фотона (px); цвет — visualization.renderer
 MATTER_LASER_PHOTON_RADIUS_PX = 1
+# Доля первоначальной массы, которая остается после полного выгорания лазера
+MATTER_LASER_REMAINING_FRACTION = 1e-4
 
 
 # =============================================================================
 # Предрасчёт горизонтов (годы)
 # =============================================================================
 PRECOMPUTE_TIME_START_YEARS = DT_YEARS
-PRECOMPUTE_TIME_END_YEARS = 150e9
+PRECOMPUTE_TIME_END_YEARS = 200e9
 
 
 # =============================================================================

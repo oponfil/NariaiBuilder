@@ -217,8 +217,10 @@ def precompute_horizons():
     print("Starting computation...", flush=True)
     
     for i, time_years in enumerate(times_years[1:], start=1):  # Пропускаем первый элемент (0)
-        # Выводим прогресс каждые 50 точек или на первой итерации
-        if i == 1 or i % 50 == 0 or i == _NUM_POINTS:
+        # Выводим прогресс каждый 1 миллиард лет или на первой/последней итерации
+        current_billion = int(time_years / 1e9)
+        previous_billion = int(times_years[i-1] / 1e9)
+        if i == 1 or current_billion > previous_billion or i == _NUM_POINTS:
             time_billion_years = time_years / 1e9
             progress_percent = i * 100 / _NUM_POINTS
             print(f"Progress: {i}/{_NUM_POINTS} ({progress_percent:.1f}%) - Time: {time_billion_years:.2f} billion years", flush=True)

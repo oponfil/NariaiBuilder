@@ -96,9 +96,9 @@ def test_laser_relativistic_corrections_at_high_beta():
     dt = 1.0
 
     original_spec = config.MATTER_THRUST_POWER_PER_KG_W
-    original_eff = matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY
+    original_eff = getattr(config, "MATTER_LASER_REMAINING_FRACTION", 1e-4)
     config.MATTER_THRUST_POWER_PER_KG_W = s
-    matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = 1.0
+    config.MATTER_LASER_REMAINING_FRACTION = 0.0
     try:
         matter_points = _setup_one_emitter(s, beta, m_rest)
 
@@ -136,7 +136,7 @@ def test_laser_relativistic_corrections_at_high_beta():
         np.testing.assert_allclose(delta_gamma_v, s * dt * active_fraction / c, rtol=1e-9)
     finally:
         config.MATTER_THRUST_POWER_PER_KG_W = original_spec
-        matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = original_eff
+        config.MATTER_LASER_REMAINING_FRACTION = original_eff
 
 
 def test_laser_blueshifts_for_infalling_source():
@@ -152,9 +152,9 @@ def test_laser_blueshifts_for_infalling_source():
     dt = 1.0
 
     original_spec = config.MATTER_THRUST_POWER_PER_KG_W
-    original_eff = matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY
+    original_eff = getattr(config, "MATTER_LASER_REMAINING_FRACTION", 1e-4)
     config.MATTER_THRUST_POWER_PER_KG_W = s
-    matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = 1.0
+    config.MATTER_LASER_REMAINING_FRACTION = 0.0
     try:
         matter_points = _setup_one_emitter(s, beta, m_rest)
 
@@ -177,7 +177,7 @@ def test_laser_blueshifts_for_infalling_source():
         assert photon_mass > dm
     finally:
         config.MATTER_THRUST_POWER_PER_KG_W = original_spec
-        matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = original_eff
+        config.MATTER_LASER_REMAINING_FRACTION = original_eff
 
 
 def test_laser_relativistic_corrections_reduce_to_classical_at_low_beta():
@@ -191,9 +191,9 @@ def test_laser_relativistic_corrections_reduce_to_classical_at_low_beta():
     dt = 1.0
 
     original_spec = config.MATTER_THRUST_POWER_PER_KG_W
-    original_eff = matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY
+    original_eff = getattr(config, "MATTER_LASER_REMAINING_FRACTION", 1e-4)
     config.MATTER_THRUST_POWER_PER_KG_W = s
-    matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = 1.0
+    config.MATTER_LASER_REMAINING_FRACTION = 0.0
     try:
         matter_points = _setup_one_emitter(s, beta, m_rest)
 
@@ -214,7 +214,7 @@ def test_laser_relativistic_corrections_reduce_to_classical_at_low_beta():
         np.testing.assert_allclose(photon_mass, dm, rtol=1e-4)
     finally:
         config.MATTER_THRUST_POWER_PER_KG_W = original_spec
-        matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = original_eff
+        config.MATTER_LASER_REMAINING_FRACTION = original_eff
 
 
 def test_laser_high_power_burns_exponentially_within_one_dt():
@@ -227,9 +227,9 @@ def test_laser_high_power_burns_exponentially_within_one_dt():
     dt = 1.0
 
     original_spec = config.MATTER_THRUST_POWER_PER_KG_W
-    original_eff = matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY
+    original_eff = getattr(config, "MATTER_LASER_REMAINING_FRACTION", 1e-4)
     config.MATTER_THRUST_POWER_PER_KG_W = s
-    matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = 1.0
+    config.MATTER_LASER_REMAINING_FRACTION = 0.0
     try:
         matter_points = _setup_one_emitter(s, beta_radial=0.0, m_rest=m_rest)
 
@@ -248,7 +248,7 @@ def test_laser_high_power_burns_exponentially_within_one_dt():
         np.testing.assert_allclose(matter_points.masses_per_point[0], np.exp(-1.0), rtol=1e-12)
     finally:
         config.MATTER_THRUST_POWER_PER_KG_W = original_spec
-        matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = original_eff
+        config.MATTER_LASER_REMAINING_FRACTION = original_eff
 
 
 def _setup_one_emitter_with_bh(thrust_w_per_kg, r_phys, m_bh_kg, m_rest=1.0):
@@ -283,9 +283,9 @@ def test_sds_gravitational_time_dilation_slows_laser_burn_near_bh():
     expected_sqrt_f = np.sqrt(1.0 - r_s / r_phys)
 
     original_spec = config.MATTER_THRUST_POWER_PER_KG_W
-    original_eff = matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY
+    original_eff = getattr(config, "MATTER_LASER_REMAINING_FRACTION", 1e-4)
     config.MATTER_THRUST_POWER_PER_KG_W = s
-    matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = 1.0
+    config.MATTER_LASER_REMAINING_FRACTION = 0.0
     try:
         mp = _setup_one_emitter_with_bh(s, r_phys, m_bh, m_rest)
         mp.update_positions_and_velocities(
@@ -306,7 +306,7 @@ def test_sds_gravitational_time_dilation_slows_laser_burn_near_bh():
         np.testing.assert_allclose(photon_mass_coord, dm * expected_sqrt_f, rtol=1e-9)
     finally:
         config.MATTER_THRUST_POWER_PER_KG_W = original_spec
-        matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = original_eff
+        config.MATTER_LASER_REMAINING_FRACTION = original_eff
 
 
 def test_sds_gravity_weakens_near_horizon():
@@ -359,9 +359,9 @@ def test_sds_reduces_to_newton_far_from_bh():
     r_phys = 1.0e8 * r_s  # r ≫ r_s → √f − 1 ≈ −5e-9
 
     original_spec = config.MATTER_THRUST_POWER_PER_KG_W
-    original_eff = matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY
+    original_eff = getattr(config, "MATTER_LASER_REMAINING_FRACTION", 1e-4)
     config.MATTER_THRUST_POWER_PER_KG_W = s
-    matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = 1.0
+    config.MATTER_LASER_REMAINING_FRACTION = 0.0
     try:
         mp = _setup_one_emitter_with_bh(s, r_phys, m_bh, m_rest)
         mp.update_positions_and_velocities(
@@ -376,7 +376,7 @@ def test_sds_reduces_to_newton_far_from_bh():
         np.testing.assert_allclose(dm, _expected_laser_dm(s, m_rest, dt), rtol=1e-7)
     finally:
         config.MATTER_THRUST_POWER_PER_KG_W = original_spec
-        matter_points_mod._MATTER_LASER_CONVERSION_EFFICIENCY = original_eff
+        config.MATTER_LASER_REMAINING_FRACTION = original_eff
 
 
 def test_emitter_mask_selects_points_inside_event_horizon():

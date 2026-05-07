@@ -47,7 +47,7 @@ python scripts/precompute_horizons.py
 Then run the main simulation:
 
 ```bash
-python main.py
+python simulator.py
 ```
 
 ## Controls
@@ -72,7 +72,7 @@ In `config.py`, the `MATTER_INITIAL_DISTRIBUTION` parameter sets the starting ge
 
 ## Project Structure
 
-- `main.py` - main launch file
+- `simulator.py` - main launch file
 - `config.py` - simulation parameters (time, matter, laser, etc.)
 - `physics/` - physical models
   - `objects.py` - `Universe` class (cosmological simulation time)

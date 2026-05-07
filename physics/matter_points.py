@@ -23,8 +23,6 @@ from utils.constants import (
     SECONDS_PER_YEAR,
 )
 
-# Доля покоящейся массы, доступной для лазерного выгорания (остальное — «пол»).
-_MATTER_LASER_CONVERSION_EFFICIENCY = 1.0 - 10.0**-6
 
 
 def _scale_factor_lookup(years_arr: np.ndarray) -> np.ndarray:
@@ -194,6 +192,31 @@ class MatterPoints:
         # UI после рендеринга видит уже уменьшенные массы; для отображения/пика нужно
         # значение в момент эмиссии (как P = MATTER_THRUST_POWER_PER_KG_W · m_rest в config).
         self._last_step_nominal_sigma_p_w = 0.0
+
+    def clear_photons(self):
+        """Очистить все лазерные фотоны и связанные с ними массивы"""
+        self._laser_photon_chi = np.empty(0, dtype=np.float64)
+        self._laser_photon_mass_emit_kg = np.empty(0, dtype=np.float64)
+        self._laser_photon_a_emit = np.empty(0, dtype=np.float64)
+        self._laser_photon_r_emit_m = np.empty(0, dtype=np.float64)
+        self._laser_photon_ux = np.empty(0, dtype=np.float64)
+        self._laser_photon_uy = np.empty(0, dtype=np.float64)
+        self._laser_photon_source_idx = np.empty(0, dtype=np.int64)
+        self._laser_photon_emit_t_seconds = np.empty(0, dtype=np.float64)
+        self._laser_photon_last_time_seconds = None
+        
+        # Также сбрасываем параметры лазера для точек
+        if self.points_comoving is not None:
+            n = len(self.points_comoving)
+            self._laser_start_r_phys = np.full(n, np.nan, dtype=np.float64)
+            self._laser_off_t_seconds = np.full(n, np.nan, dtype=np.float64)
+            self._laser_off_r_phys = np.full(n, np.nan, dtype=np.float64)
+            self._laser_start_mass_kg = np.full(n, np.nan, dtype=np.float64)
+        
+        self.t_laser_start_seconds = None
+        self.laser_absorbed_mass = 0.0
+        self._last_step_nominal_sigma_p_w = 0.0
+        self._laser_photons_version += 1
 
     def _update_comoving_distances(self):
         """ОПТИМИЗАЦИЯ: Пересчитать comoving расстояния от центра"""
@@ -925,8 +948,9 @@ class MatterPoints:
                     if np.any(fresh_laser):
                         self._laser_start_mass_kg[fresh_laser] = masses_current[fresh_laser]
 
+                    laser_remaining_frac = float(getattr(config, 'MATTER_LASER_REMAINING_FRACTION', 1e-4))
                     efficiency = float(
-                        np.clip(_MATTER_LASER_CONVERSION_EFFICIENCY, 0.0, 1.0)
+                        np.clip(1.0 - laser_remaining_frac, 0.0, 1.0)
                     )
                     laser_mass_floor_arr = laser_mass_floor(
                         self._laser_start_mass_kg,

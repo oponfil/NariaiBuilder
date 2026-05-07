@@ -66,9 +66,14 @@ def main():
     running = True
     while running:
         # Обработка ввода
-        running = renderer.handle_input(universe, cosmology)
-        if not running:
+        action = renderer.handle_input(universe, cosmology)
+        if action == "QUIT":
             break
+        elif action == "RESET":
+            universe, cosmology = create_test_universe()
+            renderer.reset()
+            continue
+
         
         # Обновление времени и космологии только если не на паузе
         if not renderer.paused:

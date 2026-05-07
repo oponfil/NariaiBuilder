@@ -5,6 +5,7 @@ import pygame
 import config
 from utils.constants import SECONDS_PER_YEAR
 from utils.cosmology_utils import calculate_scale_factor_at_time
+from utils.config_utils import toggle_coordinate_display_mode, toggle_matter_distribution_mode
 
 
 
@@ -18,19 +19,19 @@ class InputHandler:
         """
         self.renderer = renderer
     
-    def handle_input(self, universe=None, cosmology=None) -> bool:
+    def handle_input(self, universe=None, cosmology=None) -> str:
         """
         Обработать ввод пользователя
-        Returns: True если нужно продолжить, False если выйти
+        Returns: Строка команды ("QUIT", "RESET", "CONTINUE")
         """
         renderer = self.renderer
         
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                return False
+                return "QUIT"
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    return False
+                    return "QUIT"
                 # Пробел или P для паузы/старта
                 elif event.key == pygame.K_SPACE or event.key == pygame.K_p:
                     renderer.paused = not renderer.paused
@@ -43,6 +44,30 @@ class InputHandler:
                 renderer.height = event.h
                 renderer.camera_x = renderer.width // 2
                 renderer.camera_y = renderer.height // 2
+            
+            # Обработка кликов мыши
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:  # ЛКМ
+                    if hasattr(renderer, 'ui_rects'):
+                        mouse_pos = event.pos
+                        if renderer.ui_rects.get("play") and renderer.ui_rects["play"].collidepoint(mouse_pos):
+                            renderer.paused = not renderer.paused
+                        elif renderer.ui_rects.get("reset") and renderer.ui_rects["reset"].collidepoint(mouse_pos):
+                            return "RESET"
+                        elif renderer.ui_rects.get("mode") and renderer.ui_rects["mode"].collidepoint(mouse_pos):
+                            toggle_coordinate_display_mode()
+                        elif renderer.ui_rects.get("dist") and renderer.ui_rects["dist"].collidepoint(mouse_pos):
+                            toggle_matter_distribution_mode()
+                            if hasattr(renderer, "invalidate_mass_cache"):
+                                renderer.invalidate_mass_cache()
+                            return "CONTINUE"
+            
+            elif event.type == pygame.MOUSEWHEEL:
+                zoom_factor = 1.1
+                if event.y > 0:
+                    renderer.zoom *= zoom_factor
+                elif event.y < 0:
+                    renderer.zoom /= zoom_factor
         
         # Перемотка времени клавишами влево/вправо на паузе
         if renderer.paused and universe is not None and cosmology is not None:
@@ -52,7 +77,7 @@ class InputHandler:
             if keys[pygame.K_LEFT]:
                 # Отматываем назад. ВАЖНО: сначала меняем время, потом обновляем космологию
                 # (или наоборот, но важно соблюдать порядок как в основном цикле, но с отрицательным dt)
-                # В main.py: time += dt, затем update_scale_factor(dt). Повторяем эту логику.
+                # В simulator.py: time += dt, затем update_scale_factor(dt). Повторяем эту логику.
                 # Но проверяем на < 0
                 if universe.time > dt_seconds:
                     dt = -dt_seconds
@@ -70,4 +95,4 @@ class InputHandler:
                 renderer._manual_cosmic_step_this_frame = True
                 renderer._manual_cosmic_dt_signed = dt
         
-        return True
+        return "CONTINUE"

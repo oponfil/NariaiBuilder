@@ -2,6 +2,7 @@
 Модуль UI панели информации для симуляции
 """
 import numpy as np
+import pygame
 
 import config
 from config import DEBUG
@@ -14,7 +15,7 @@ from utils.constants import (
     SECONDS_PER_BILLION_YEARS,
     c,
 )
-from utils.config_utils import get_dt, get_mass_per_point_kg
+from utils.config_utils import get_dt, get_mass_per_point_kg, get_coordinate_display_mode
 from utils.format_utils import format_velocity_m_per_s
 
 
@@ -70,11 +71,7 @@ class InfoPanel:
         else:
             percent_matter = 0.0
             percent_dark_energy = 0.0
-        
-        # Статус паузы
-        pause_status = "⏸ PAUSED" if renderer.paused else "▶ PLAYING"
-        pause_color = (255, 200, 0) if renderer.paused else (0, 255, 0)
-        
+            
         v_line, m_line = self._format_point_kinematics_lines(scale_factor)
         photon_mass_line = self._format_single_photon_mass_line(scale_factor)
         peak_laser_line = self._format_laser_peak_power_line(scale_factor, masses)
@@ -101,17 +98,101 @@ class InfoPanel:
             all_photons_line,
         ]
         
-        # Отображаем статус паузы вверху справа
-        pause_text = renderer.font.render(pause_status, True, pause_color)
-        pause_x = renderer.width - pause_text.get_width() - 10
-        pause_y = 10
-        renderer.screen.blit(pause_text, (pause_x, pause_y))
+        # Отрисовка интерактивных кнопок вверху по центру
+        mouse_pos = pygame.mouse.get_pos()
         
-        # Подсказка для управления паузой
-        hint_text = renderer.small_font.render("Space or P - pause/play", True, (150, 150, 150))
-        hint_x = renderer.width - hint_text.get_width() - 10
-        hint_y = pause_y + pause_text.get_height() + 5
-        renderer.screen.blit(hint_text, (hint_x, hint_y))
+        # Общие размеры слайдеров
+        slider_w = 200
+        slider_h = 30
+        knob_w = slider_w // 2
+        
+        total_top_width = ui.BUTTON_WIDTH * 2 + slider_w + ui.BUTTON_MARGIN * 2
+        start_x = (renderer.width - total_top_width) // 2
+        
+        # 1. Play/Pause
+        play_rect = pygame.Rect(start_x, ui.BUTTON_Y, ui.BUTTON_WIDTH, ui.BUTTON_HEIGHT)
+        play_color = ui.BUTTON_PAUSED_COLOR if renderer.paused else ui.BUTTON_PLAYING_COLOR
+        if play_rect.collidepoint(mouse_pos):
+            play_color = (min(255, play_color[0]+30), min(255, play_color[1]+30), min(255, play_color[2]+30))
+        pygame.draw.rect(renderer.screen, play_color, play_rect, border_radius=5)
+        play_text_str = "PLAY" if renderer.paused else "PAUSE"
+        play_text = renderer.font.render(play_text_str, True, ui.BUTTON_TEXT_COLOR)
+        play_text_rect = play_text.get_rect(center=play_rect.center)
+        renderer.screen.blit(play_text, play_text_rect)
+        
+        # 2. Reset
+        reset_x = start_x + ui.BUTTON_WIDTH + ui.BUTTON_MARGIN
+        reset_rect = pygame.Rect(reset_x, ui.BUTTON_Y, ui.BUTTON_WIDTH, ui.BUTTON_HEIGHT)
+        reset_color = ui.BUTTON_RESET_HOVER_COLOR if reset_rect.collidepoint(mouse_pos) else ui.BUTTON_RESET_COLOR
+        pygame.draw.rect(renderer.screen, reset_color, reset_rect, border_radius=5)
+        reset_text = renderer.font.render("RESET", True, ui.BUTTON_TEXT_COLOR)
+        reset_text_rect = reset_text.get_rect(center=reset_rect.center)
+        renderer.screen.blit(reset_text, reset_text_rect)
+        
+        # 3. Слайдер Distribution Mode (вверху экрана, справа от кнопок)
+        import config
+        is_spiral = getattr(config, "MATTER_INITIAL_DISTRIBUTION", "spiral").strip().lower() == "spiral"
+        dist_slider_x = reset_x + ui.BUTTON_WIDTH + ui.BUTTON_MARGIN
+        dist_slider_y = ui.BUTTON_Y + (ui.BUTTON_HEIGHT - slider_h) // 2
+        
+        dist_rect = pygame.Rect(dist_slider_x, dist_slider_y, slider_w, slider_h)
+        pygame.draw.rect(renderer.screen, (40, 40, 60), dist_rect, border_radius=15)
+        
+        dist_knob_x = dist_slider_x if is_spiral else dist_slider_x + knob_w
+        dist_knob_rect = pygame.Rect(dist_knob_x, dist_slider_y, knob_w, slider_h)
+        dist_knob_color = (150, 100, 200) if is_spiral else (100, 200, 150)
+        
+        if dist_rect.collidepoint(mouse_pos):
+            dist_knob_color = (min(255, dist_knob_color[0]+30), min(255, dist_knob_color[1]+30), min(255, dist_knob_color[2]+30))
+            
+        pygame.draw.rect(renderer.screen, dist_knob_color, dist_knob_rect, border_radius=15)
+        
+        spiral_text = renderer.small_font.render("Spiral", True, (255, 255, 255))
+        uniform_text = renderer.small_font.render("Uniform", True, (255, 255, 255))
+        
+        spiral_rect = spiral_text.get_rect(center=(dist_slider_x + knob_w//2, dist_slider_y + slider_h//2))
+        uniform_rect = uniform_text.get_rect(center=(dist_slider_x + slider_w - knob_w//2, dist_slider_y + slider_h//2))
+        
+        renderer.screen.blit(spiral_text, spiral_rect)
+        renderer.screen.blit(uniform_text, uniform_rect)
+        
+        # 4. Слайдер Coordinate Mode (внизу экрана)
+        is_comoving = get_coordinate_display_mode() == "comoving"
+        slider_x = (renderer.width - slider_w) // 2
+        slider_y = renderer.height - 40
+        
+        mode_rect = pygame.Rect(slider_x, slider_y, slider_w, slider_h)
+        # Фон слайдера
+        pygame.draw.rect(renderer.screen, (40, 40, 60), mode_rect, border_radius=15)
+        
+        # Ползунок (активная часть)
+        knob_x = slider_x + knob_w if is_comoving else slider_x
+        knob_rect = pygame.Rect(knob_x, slider_y, knob_w, slider_h)
+        knob_color = (80, 120, 200) if is_comoving else (200, 120, 80)
+        
+        # Подсветка при наведении
+        if mode_rect.collidepoint(mouse_pos):
+            knob_color = (min(255, knob_color[0]+30), min(255, knob_color[1]+30), min(255, knob_color[2]+30))
+            
+        pygame.draw.rect(renderer.screen, knob_color, knob_rect, border_radius=15)
+        
+        # Тексты
+        phys_text = renderer.small_font.render("Physical", True, (255, 255, 255))
+        comov_text = renderer.small_font.render("Comoving", True, (255, 255, 255))
+        
+        phys_rect = phys_text.get_rect(center=(slider_x + knob_w//2, slider_y + slider_h//2))
+        comov_rect = comov_text.get_rect(center=(slider_x + slider_w - knob_w//2, slider_y + slider_h//2))
+        
+        renderer.screen.blit(phys_text, phys_rect)
+        renderer.screen.blit(comov_text, comov_rect)
+        
+        # Сохраняем области кнопок для обработки кликов
+        renderer.ui_rects = {
+            "play": play_rect,
+            "reset": reset_rect,
+            "mode": mode_rect,
+            "dist": dist_rect
+        }
         
         y_offset = 10
         for line in info_lines:
@@ -159,7 +240,7 @@ class InfoPanel:
         if m0 <= 0.0:
             return ""
         pct = 100.0 * float(m_rest_kg) / m0
-        return f" ({pct:.1f}%)"
+        return f" ({pct:.2f}%)"
 
     def _format_point_kinematics_lines(self, scale_factor: float):
         """Скорость и эффективная масса одной дальней лазерной точки."""
@@ -265,27 +346,14 @@ class InfoPanel:
                     picked = True
 
         if not picked:
-            spec = float(getattr(config, 'MATTER_THRUST_POWER_PER_KG_W', 0.0))
-            m_emitter_kg = float(get_mass_per_point_kg())
-            try:
-                r = self.renderer
-                mp_fallback = r.matter_points
-                far_i_fallback = self._farthest_laser_emitter_index(scale_factor)
-                if (
-                    far_i_fallback is not None
-                    and getattr(mp_fallback, 'masses_per_point', None) is not None
-                ):
-                    arr_m = mp_fallback.masses_per_point
-                    if far_i_fallback < len(arr_m):
-                        m_emitter_kg = float(arr_m[far_i_fallback])
-            except AttributeError:
-                pass
-            power_now = spec * m_emitter_kg
-            m_emit = power_now * float(get_dt()) / (c * c)
-            m_photon = m_emit
-            redshift_factor = 1.0
+            # Лазер выключен или фотоны еще не долетели/уже упали.
+            # Не рисуем фантомные значения, если сжигаемая масса исчерпана.
+            m_photon = 0.0
+            m_emit = 0.0
 
         pct_of_emit = 100.0 * m_photon / m_emit if m_emit > 0.0 else 0.0
+        if m_photon == 0.0:
+            return "Photon m: 0.00e+00 kg (0.00%)"
         return f"Photon m: {m_photon:.2e} kg ({pct_of_emit:.2f}%)"
 
     def _format_laser_peak_power_line(

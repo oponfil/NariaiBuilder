@@ -32,8 +32,9 @@ from utils.cosmology_utils import calculate_scale_factor_at_time
 class MatterSimulation:
     """Класс для управления симуляцией материи"""
     
-    def __init__(self):
+    def __init__(self, mode=None):
         """Инициализация симуляции материи"""
+        self.mode = mode
         self.matter_points = MatterPoints()
         self.matter_points_initialized = False
         self.current_num_points = 0
@@ -307,7 +308,9 @@ class MatterSimulation:
         print(f"[DEBUG] initialize_matter_points: radius={CAUSAL_HORIZON_COMOVING_METERS:.2e} m ({CAUSAL_HORIZON_COMOVING_METERS/9.461e24:.1f} Gly)")
         
         # Генерируем точки в ПОЛНОМ ПРИЧИННОМ РАДИУСЕ (сопутствующий)
-        mode = getattr(config, "MATTER_INITIAL_DISTRIBUTION", "uniform")
+        mode = self.mode
+        if mode is None:
+            mode = getattr(config, "MATTER_INITIAL_DISTRIBUTION", "uniform")
         if isinstance(mode, str):
             mode = mode.strip().lower()
         
@@ -351,6 +354,7 @@ class MatterSimulation:
         self.matter_points._bump_masses_version()
         
         self.matter_points.init_laser_emitter_mask(len(generated_points))
+        self.matter_points.clear_photons()
         
         self.matter_points_initialized = True
         self.current_num_points = len(self.matter_points.points_comoving)

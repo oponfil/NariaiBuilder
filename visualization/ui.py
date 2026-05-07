@@ -16,9 +16,9 @@ FONT_SIZE_LARGE = 24
 FONT_SIZE_SMALL = 18
 
 # Масштабная линейка
-RULER_LENGTH_PX = 150
+RULER_LENGTH_PX = 100
 RULER_X = 20
-RULER_Y_OFFSET = 2
+RULER_Y_OFFSET = 45
 RULER_TICK_HEIGHT = 5
 RULER_COLOR: Tuple[int, int, int] = (255, 255, 255)
 RULER_PHYSICAL_TEXT = "10 billion ly (physical)"
@@ -47,3 +47,16 @@ HORIZON_BLACK_HOLE_OFFSET_Y = -70
 
 # Инфопанель
 INFO_TEXT_COLOR: Tuple[int, int, int] = (200, 200, 200)
+
+# Кнопки UI
+BUTTON_WIDTH = 110
+BUTTON_HEIGHT = 30
+BUTTON_Y = 10
+BUTTON_MARGIN = 10
+BUTTON_COLOR: Tuple[int, int, int] = (50, 50, 70)
+BUTTON_HOVER_COLOR: Tuple[int, int, int] = (80, 80, 110)
+BUTTON_TEXT_COLOR: Tuple[int, int, int] = (255, 255, 255)
+BUTTON_PLAYING_COLOR: Tuple[int, int, int] = (40, 140, 40)
+BUTTON_PAUSED_COLOR: Tuple[int, int, int] = (160, 140, 0)
+BUTTON_RESET_COLOR: Tuple[int, int, int] = (140, 40, 40)
+BUTTON_RESET_HOVER_COLOR: Tuple[int, int, int] = (180, 60, 60)

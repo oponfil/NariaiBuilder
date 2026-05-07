@@ -82,3 +82,24 @@ def get_coordinate_display_mode() -> str:
 def is_comoving_display() -> bool:
     """True, если конфиг просит отображение в сопутствующих координатах."""
     return get_coordinate_display_mode() == _COORD_MODE_COMOVING
+
+def toggle_coordinate_display_mode() -> str:
+    """Переключить режим отображения координат и вернуть новый режим."""
+    current = get_coordinate_display_mode()
+    new_mode = _COORD_MODE_PHYSICAL if current == _COORD_MODE_COMOVING else _COORD_MODE_COMOVING
+    
+    # Переписываем значение в config.py
+    setattr(config, "COORDINATE_DISPLAY_MODE", new_mode)
+    
+    # Сбрасываем кэш
+    _coord_mode_cache["raw"] = new_mode
+    _coord_mode_cache["mode"] = new_mode
+    
+    return new_mode
+
+def toggle_matter_distribution_mode() -> str:
+    """Переключить режим распределения точек материи."""
+    current = getattr(config, "MATTER_INITIAL_DISTRIBUTION", "spiral").strip().lower()
+    new_mode = "uniform" if current == "spiral" else "spiral"
+    setattr(config, "MATTER_INITIAL_DISTRIBUTION", new_mode)
+    return new_mode
