@@ -50,6 +50,12 @@ Then run the main simulation:
 python simulator.py
 ```
 
+To automatically find the minimum required laser specific power (W/kg) to build a Nariai black hole using headless binary search, run:
+
+```bash
+python scripts/find_nariai_threshold.py
+```
+
 ## Controls
 
 - **Space** or **P** - pause/resume
@@ -69,6 +75,10 @@ In `config.py`, the `MATTER_INITIAL_DISTRIBUTION` parameter sets the starting ge
 
 - `"uniform"` (default) — uniform volume distribution projected onto the screen plane.
 - `"spiral"` — projected as a spiral. It mathematically reflects a uniform distribution of matter by distance from the center, but is visualized as a uniform spiral for better structural clarity.
+
+Also in `config.py` you can control the randomness of the generated distribution using the `MATTER_SEED` parameter:
+- `MATTER_SEED = 42` (or any other integer) — uses a fixed seed to generate the exact same particle positions every time. This guarantees fully deterministic results for threshold finding.
+- `MATTER_SEED = 0` — generates a random distribution on every run. Note that with 1000 particles, exact physics results (e.g., the threshold power required to reach the Nariai limit) can fluctuate by ~10% due to statistical variation in starting coordinates.
 
 ## Project Structure
 
@@ -96,6 +106,7 @@ In `config.py`, the `MATTER_INITIAL_DISTRIBUTION` parameter sets the starting ge
 - `scripts/` - utility scripts
   - `precompute_horizons.py` - horizon precomputation
   - `bench_calculate_masses.py` - mass calculation benchmark
+  - `find_nariai_threshold.py` - headless script to find the specific power threshold using binary search
 - `tests/` - tests for cosmological calculations and matter dynamics
 
 ## Physical Models

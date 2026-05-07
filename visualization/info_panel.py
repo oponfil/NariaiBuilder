@@ -207,8 +207,8 @@ class InfoPanel:
         # Панель с массами внизу слева
         self._draw_mass_panel(renderer, universe, cosmology, masses)
     
-    def _farthest_laser_emitter_index(self, scale_factor: float) -> int | None:
-        """Индекс самой удалённой точки среди испускателей лазера (маска laser_emitter_mask)."""
+    def _nearest_laser_emitter_index(self, scale_factor: float) -> int | None:
+        """Индекс самой ближней точки среди испускателей лазера (маска laser_emitter_mask)."""
         renderer = self.renderer
         try:
             mp = renderer.matter_points
@@ -232,7 +232,7 @@ class InfoPanel:
         candidate_indices = np.where(candidate_mask)[0]
         if len(candidate_indices) == 0:
             return None
-        return int(candidate_indices[np.argmax(distances[candidate_indices])])
+        return int(candidate_indices[np.argmin(distances[candidate_indices])])
     
     def _m_point_pct_of_initial_suffix(self, m_rest_kg: float) -> str:
         """Скобки: процент массы покоя точки от get_mass_per_point_kg()."""
@@ -243,7 +243,7 @@ class InfoPanel:
         return f" ({pct:.2f}%)"
 
     def _format_point_kinematics_lines(self, scale_factor: float):
-        """Скорость и эффективная масса одной дальней лазерной точки."""
+        """Скорость и эффективная масса одной ближней лазерной точки."""
         renderer = self.renderer
         try:
             mp = renderer.matter_points
@@ -289,16 +289,16 @@ class InfoPanel:
                 f"Point m: {m_rest:.2e} kg{self._m_point_pct_of_initial_suffix(m_rest)}",
             )
 
-        farthest_idx = self._farthest_laser_emitter_index(scale_factor)
-        if farthest_idx is None:
+        nearest_idx = self._nearest_laser_emitter_index(scale_factor)
+        if nearest_idx is None:
             return (
                 "Point v: —",
                 f"Point m: {m_rest:.2e} kg{self._m_point_pct_of_initial_suffix(m_rest)}",
             )
 
-        v_point = float(speeds[farthest_idx])
+        v_point = float(speeds[nearest_idx])
         if masses_per_point is not None and len(masses_per_point) == len(speeds):
-            m_rest = float(np.asarray(masses_per_point, dtype=np.float64)[farthest_idx])
+            m_rest = float(np.asarray(masses_per_point, dtype=np.float64)[nearest_idx])
         beta2 = min(v_point * v_point / (c * c), 1.0 - 1e-15)
         gamma = 1.0 / np.sqrt(1.0 - beta2)
         m_eff = gamma * m_rest
@@ -308,7 +308,7 @@ class InfoPanel:
         )
 
     def _format_single_photon_mass_line(self, scale_factor: float) -> str:
-        """Масса-эквивалент первого пакета с самой дальней лазерной точки (мин. a_emit у источника)."""
+        """Масса-эквивалент первого пакета с самой ближней лазерной точки (мин. a_emit у источника)."""
         renderer = self.renderer
         try:
             mp = renderer.matter_points
@@ -330,10 +330,10 @@ class InfoPanel:
             and len(photon_src) == len(photon_masses)
             and scale_factor > 0
         ):
-            far_i = self._farthest_laser_emitter_index(scale_factor)
-            if far_i is not None:
+            near_i = self._nearest_laser_emitter_index(scale_factor)
+            if near_i is not None:
                 src_arr = np.asarray(photon_src, dtype=np.int64)
-                cand = np.where(src_arr == int(far_i))[0]
+                cand = np.where(src_arr == int(near_i))[0]
                 if cand.size > 0:
                     a_all = np.asarray(photon_a_emit, dtype=np.float64)
                     m_all = np.asarray(photon_masses, dtype=np.float64)

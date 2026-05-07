@@ -713,6 +713,7 @@ class MatterPoints:
         scale_ratio: float,
         r_black_hole: float = None,
         universe_time_seconds: float = None,
+        r_event_horizon: float = None,
     ):
         """
         Обновить позиции точек на основе их скоростей и пересчитать скорости.
@@ -943,6 +944,13 @@ class MatterPoints:
                     emitter_mask = np.zeros(n_total, dtype=bool)
                     if le is not None and len(le) == n_total:
                         emitter_mask = np.asarray(le, dtype=bool)
+
+                    if r_event_horizon is not None and r_event_horizon > 0:
+                        outside_eh = (dist > r_event_horizon) & emitter_mask
+                        if np.any(outside_eh):
+                            emitter_mask &= ~outside_eh
+                            stopped_indices = np.flatnonzero(outside_eh)
+                            mark_laser_stopped_for_indices(stopped_indices, dist)
 
                     fresh_laser = radial_ok & emitter_mask & np.isnan(self._laser_start_mass_kg)
                     if np.any(fresh_laser):

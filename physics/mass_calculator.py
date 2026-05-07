@@ -622,6 +622,7 @@ class MassCalculator:
         # Проверяем только при движении времени вперёд.
         if (self.previous_particle_horizon_mass > 0 and
             M_particle_horizon < self.previous_particle_horizon_mass and
+            self.last_calculated_time is not None and
             universe.time >= self.last_calculated_time):
 
             time_years = universe.time / 3.154e16
@@ -629,6 +630,7 @@ class MassCalculator:
             M_particle_horizon_theoretical = (4/3) * np.pi * (r_particle_horizon**3) * rho_matter
 
             print(f"\n{'='*80}")
+        if getattr(config, 'DEBUG', False):
             print(f"[DEBUG] Масса горизонта частиц УМЕНЬШАЕТСЯ! Время: {time_years:.2f} млрд лет")
             print(f"  Текущая масса: {M_particle_horizon:.2e} кг")
             print(f"  Предыдущая масса: {self.previous_particle_horizon_mass:.2e} кг")

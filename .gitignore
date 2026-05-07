@@ -11,7 +11,7 @@ env/
 ENV/
 
 # Data and Cache
-data/*.json
+data/
 
 # IDEs
 .vscode/

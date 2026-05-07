@@ -58,7 +58,8 @@ class MatterSimulation:
         Returns:
             np.ndarray: Массив точек в 3D координатах (N x 3)
         """
-        print(f"[DEBUG] generate_points_in_3d_sphere: starting with num_points={num_points}, radius={radius:.2e}")
+        if getattr(config, 'DEBUG', False):
+            print(f"[DEBUG] generate_points_in_3d_sphere: starting with num_points={num_points}, radius={radius:.2e}")
         start_time = time.perf_counter()
         
         # Используем независимый генератор случайных чисел для лучшей случайности
@@ -81,7 +82,8 @@ class MatterSimulation:
         
         # УЛУЧШЕННЫЙ АЛГОРИТМ: Метод Marsaglia (rejection sampling)
         # Генерируем точки в кубе [-1, 1]^3 и отбрасываем точки вне сферы
-        print(f"[DEBUG] Generating uniform points in 3D sphere using Marsaglia method...")
+        if getattr(config, 'DEBUG', False):
+            print(f"[DEBUG] Generating uniform points in 3D sphere using Marsaglia method...")
         t0 = time.perf_counter()
         
         points_generated = 0
@@ -135,10 +137,12 @@ class MatterSimulation:
             shuffle_indices = rng.permutation(len(result))
             result = result[shuffle_indices]
         
-        print(f"[DEBUG] Generated {num_points} uniform points in {(time.perf_counter() - t0)*1000:.2f} ms")
+        if getattr(config, 'DEBUG', False):
+            print(f"[DEBUG] Generated {num_points} uniform points in {(time.perf_counter() - t0)*1000:.2f} ms")
         
         total_time = time.perf_counter() - start_time
-        print(f"[DEBUG] generate_points_in_3d_sphere: completed in {total_time*1000:.2f} ms")
+        if getattr(config, 'DEBUG', False):
+            print(f"[DEBUG] generate_points_in_3d_sphere: completed in {total_time*1000:.2f} ms")
         
         return result
     
@@ -267,7 +271,8 @@ class MatterSimulation:
         if self.matter_points_initialized and self.matter_points.points_comoving is not None:
             return
         
-        print("[DEBUG] initialize_matter_points: starting initialization...")
+        if getattr(config, 'DEBUG', False):
+            print("[DEBUG] initialize_matter_points: starting initialization...")
         init_start = time.perf_counter()
         
         # Получаем текущий масштабный фактор
@@ -303,9 +308,10 @@ class MatterSimulation:
             print(f"Warning: Limiting num_points from {num_points} to {max_total_points}")
             num_points = max_total_points
         
-        print(f"[DEBUG] initialize_matter_points: num_points={num_points}")
-        print(f"[DEBUG] initialize_matter_points: total_mass={total_mass:.2e} kg (maximum)")
-        print(f"[DEBUG] initialize_matter_points: radius={CAUSAL_HORIZON_COMOVING_METERS:.2e} m ({CAUSAL_HORIZON_COMOVING_METERS/9.461e24:.1f} Gly)")
+        if getattr(config, 'DEBUG', False):
+            print(f"[DEBUG] initialize_matter_points: num_points={num_points}")
+            print(f"[DEBUG] initialize_matter_points: total_mass={total_mass:.2e} kg (maximum)")
+            print(f"[DEBUG] initialize_matter_points: radius={CAUSAL_HORIZON_COMOVING_METERS:.2e} m ({CAUSAL_HORIZON_COMOVING_METERS/9.461e24:.1f} Gly)")
         
         # Генерируем точки в ПОЛНОМ ПРИЧИННОМ РАДИУСЕ (сопутствующий)
         mode = self.mode
@@ -315,7 +321,8 @@ class MatterSimulation:
             mode = mode.strip().lower()
         
         if mode == "spiral":
-            print("[DEBUG] initialize_matter_points: spiral mode, plane XY (z=0), 1 turn")
+            if getattr(config, 'DEBUG', False):
+                print("[DEBUG] initialize_matter_points: spiral mode, plane XY (z=0), 1 turn")
             generated_points = self.generate_points_spiral_in_ball(
                 num_points,
                 CAUSAL_HORIZON_COMOVING_METERS,
@@ -328,11 +335,15 @@ class MatterSimulation:
             mode = "uniform"
         
         if mode == "uniform":
-            variable_seed = int((time.time() * 1000000 + random.randint(0, 1000000)) % 2147483647)
+            # Используем seed из конфига для детерминированности
+            matter_seed = getattr(config, 'MATTER_SEED', 42)
+            if matter_seed == 0:
+                matter_seed = int((time.time() * 1000000 + random.randint(0, 1000000)) % 2147483647)
+                
             generated_points = self.generate_points_in_3d_sphere(
                 num_points,
                 CAUSAL_HORIZON_COMOVING_METERS,
-                seed=variable_seed,
+                seed=matter_seed,
             )
         
         # Устанавливаем точки
@@ -361,8 +372,9 @@ class MatterSimulation:
         self.last_added_radius_comoving = particle_horizon_initial_comoving
         
         init_time = time.perf_counter() - init_start
-        print(f"Initialized {self.current_num_points} matter points in {init_time*1000:.2f} ms")
-        print(f"[DEBUG] Max comoving distance: {np.max(self.matter_points.comoving_distances):.2e} m = {np.max(self.matter_points.comoving_distances)/9.461e24:.1f} Gly")
+        if getattr(config, 'DEBUG', False):
+            print(f"Initialized {self.current_num_points} matter points in {init_time*1000:.2f} ms")
+            print(f"[DEBUG] Max comoving distance: {np.max(self.matter_points.comoving_distances):.2e} m = {np.max(self.matter_points.comoving_distances)/9.461e24:.1f} Gly")
     
     def add_matter_points(self, universe, cosmology, num_new_points: int, radius_physical: float):
         """
@@ -464,12 +476,14 @@ class MatterSimulation:
             scale_factor = cosmology.scale_factor
             particle_horizon_physical = cosmology.particle_horizon(universe.time)
             scale_ratio = self._calculate_scale_ratio(universe, cosmology, particle_horizon_physical)
+            r_event_horizon = cosmology.cosmological_event_horizon(universe.time)
             self.matter_points.update_positions_and_velocities(
                 dt_step_signed,
                 scale_factor,
                 scale_ratio,
                 r_black_hole,
                 universe_time_seconds=universe.time,
+                r_event_horizon=r_event_horizon,
             )
             self.last_collapse_time = universe.time
             return
@@ -488,9 +502,11 @@ class MatterSimulation:
             
             if not paused and self.matter_points.points_comoving is not None:
                 dt = dt_step_signed if dt_step_signed is not None else get_dt()
+                r_event_horizon = cosmology.cosmological_event_horizon(universe.time)
                 self.matter_points.update_positions_and_velocities(
                     dt, scale_factor, scale_ratio, r_black_hole,
                     universe_time_seconds=universe.time,
+                    r_event_horizon=r_event_horizon,
                 )
             
             self.last_collapse_time = universe.time
