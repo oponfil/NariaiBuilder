@@ -363,10 +363,11 @@ class InfoPanel:
         Только накопленный пик номинальной ΣP (Вт): s·(сумма масс покоя активных
         источников в момент эмиссии на шаге, до выгорания mass). См. MatterPoints.total_laser_emitters_power_w.
         """
+        limit_to_planck = getattr(config, 'LIMIT_TOTAL_POWER_TO_PLANCK', False)
         spec = float(getattr(config, 'MATTER_THRUST_POWER_PER_KG_W', 0.0))
         pp_planck = float(PLANCK_POWER_W)
-        if spec <= 0.0:
-            return "Peak ΣP: 0 W (0.0% Planck)"
+        if not limit_to_planck and spec <= 0.0:
+            return "Peak ΣP: 0 W (0.00 × Planck)"
         try:
             mp = self.renderer.matter_points
             r_bh = None
@@ -378,7 +379,7 @@ class InfoPanel:
         self._max_laser_emitters_power_w = max(self._max_laser_emitters_power_w, p_w)
         p_mx = self._max_laser_emitters_power_w
         return (
-            f"Peak ΣP: {p_mx:.2e} W ({100.0 * p_mx / pp_planck:.1f}% Planck)"
+            f"Peak ΣP: {p_mx:.2e} W ({p_mx / pp_planck:.2f} × Planck)"
         )
 
     def _format_all_in_flight_photons_line(self, scale_factor: float) -> str:

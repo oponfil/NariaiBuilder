@@ -4,11 +4,19 @@
 Запускает симуляцию в headless-режиме (без графического интерфейса) и использует 
 бинарный поиск для нахождения минимальной удельной мощности лазера (Вт/кг), 
 при которой масса центральной черной дыры достигнет предела Нариаи.
+
+Примеры запуска:
+    Продолжить расчет (загружает кэш и пропускает посчитанные эпохи):
+    python scripts/find_nariai_threshold.py
+
+    Сбросить кэш и начать расчет заново (перезапишет старые данные):
+    python scripts/find_nariai_threshold.py --force
 """
 
 import os
 import sys
 import json
+import argparse
 
 # Добавляем корневую директорию в путь
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -30,7 +38,7 @@ from utils.cosmology_utils import calculate_scale_factor_at_time
 # Настройки поиска и симуляции
 # =============================================================================
 # Начальное время сканирования по времени (в годах)
-SWEEP_START_TIME_YEARS = 1.0e9
+SWEEP_START_TIME_YEARS = 0.1e9
 # Максимальное время сканирования по времени (в годах)
 SWEEP_END_TIME_YEARS = 15.0e9
 # Шаг сканирования по времени (в годах)
@@ -168,11 +176,25 @@ def find_threshold_for_time(target_time_years: float, shared_cosmology: LambdaCD
     # Определяем количество знаков для округления на основе погрешности
     decimals = max(1, int(math.ceil(-math.log10(SEARCH_POWER_TOLERANCE_W))))
     
+    # Кэш для предотвращения повторных симуляций с одной и той же мощностью
+    power_cache = {}
+    
+    def run_sim_cached(power, phase_name):
+        power_rounded = round(power, decimals)
+        if power_rounded in power_cache:
+            success, t_final, m_final = power_cache[power_rounded]
+            # Не выводим в консоль повторные вычисления, чтобы не засорять лог
+            return success, t_final, m_final
+            
+        success, t_final, m_final = run_simulation_headless(power, target_time_years, shared_cosmology)
+        power_cache[power_rounded] = (success, t_final, m_final)
+        print(f"  [{phase_name}] Power: {power_rounded:.{decimals}f} W/kg -> {'SUCCESS' if success else 'FAILED'} (Max BH: {m_final/NARIAI_BLACK_HOLE_MASS_KG*100:.4f}% Nariai)")
+        return success, t_final, m_final
+        
     # Phase 1A: Вначале спускаемся по 3 порядка (делим на 1000) до провала
     phase_1_done = False
     while True:
-        success, t_final, m_final = run_simulation_headless(current_power, target_time_years, shared_cosmology)
-        print(f"  [Bound Search 1A] Power: {current_power:.{decimals}f} W/kg -> {'SUCCESS' if success else 'FAILED'} (Max BH: {m_final/NARIAI_BLACK_HOLE_MASS_KG*100:.4f}% Nariai)")
+        success, t_final, m_final = run_sim_cached(current_power, "Bound Search 1A")
         
         if not success:
             if m_final > best_failed_mass:
@@ -195,8 +217,7 @@ def find_threshold_for_time(target_time_years: float, shared_cosmology: LambdaCD
         # Phase 1B: Поднимаемся на порядок (умножаем на 10) до первого успеха
         current_power *= 10.0
         while True:
-            success, t_final, m_final = run_simulation_headless(current_power, target_time_years, shared_cosmology)
-            print(f"  [Bound Search 1B] Power: {current_power:.{decimals}f} W/kg -> {'SUCCESS' if success else 'FAILED'} (Max BH: {m_final/NARIAI_BLACK_HOLE_MASS_KG*100:.4f}% Nariai)")
+            success, t_final, m_final = run_sim_cached(current_power, "Bound Search 1B")
             
             if success:
                 break
@@ -210,8 +231,7 @@ def find_threshold_for_time(target_time_years: float, shared_cosmology: LambdaCD
         power_high = current_power
         current_power /= 2.0
         while True:
-            success, t_final, m_final = run_simulation_headless(current_power, target_time_years, shared_cosmology)
-            print(f"  [Bound Search 1C] Power: {current_power:.{decimals}f} W/kg -> {'SUCCESS' if success else 'FAILED'} (Max BH: {m_final/NARIAI_BLACK_HOLE_MASS_KG*100:.4f}% Nariai)")
+            success, t_final, m_final = run_sim_cached(current_power, "Bound Search 1C")
             
             if not success:
                 if m_final > best_failed_mass:
@@ -223,10 +243,14 @@ def find_threshold_for_time(target_time_years: float, shared_cosmology: LambdaCD
             current_power /= 2.0
                 
     # Phase 2: Binary search
-    while power_high - power_low > SEARCH_POWER_TOLERANCE_W:
+    while power_high - power_low > SEARCH_POWER_TOLERANCE_W + 1e-9:
         power_mid = round((power_low + power_high) / 2.0, decimals)
-        success, t_final, m_final = run_simulation_headless(power_mid, target_time_years, shared_cosmology)
-        print(f"  [Binary Search] Power: {power_mid:.{decimals}f} W/kg -> {'SUCCESS' if success else 'FAILED'} (Max BH: {m_final/NARIAI_BLACK_HOLE_MASS_KG*100:.4f}% Nariai)")
+        
+        # Защита от бесконечного цикла из-за проблем с точностью float
+        if power_mid == power_low or power_mid == power_high:
+            break
+            
+        success, t_final, m_final = run_sim_cached(power_mid, "Binary Search")
         if success:
             power_high = power_mid
         else:
@@ -240,7 +264,7 @@ def find_threshold_for_time(target_time_years: float, shared_cosmology: LambdaCD
     return power_high, best_failed_mass
 
 
-def sweep_time_limits():
+def sweep_time_limits(force=False):
     print("=== Nariai Black Hole Threshold vs Laser Start Time (Cosmological Epoch) ===")
     
     # Начинаем с начального времени, заданного в конфигурации
@@ -254,11 +278,52 @@ def sweep_time_limits():
     failed_times = []
     failed_max_mass_pcts = []
     
+    data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    json_path = os.path.join(data_dir, 'nariai_simulation_data.json')
+    
+    processed_times = set()
+    saved_data = {}
+    
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                saved_data = json.load(f)
+        except Exception as e:
+            print(f"Не удалось прочитать {json_path}: {e}. Файл будет пересоздан.")
+            saved_data = {}
+            force = True
+
+    if not force:
+        successful_times = saved_data.get("successful_runs", {}).get("times_billion_years", [])
+        threshold_powers = saved_data.get("successful_runs", {}).get("threshold_powers_w_per_kg", [])
+        failed_times = saved_data.get("failed_runs", {}).get("times_billion_years", [])
+        failed_max_mass_pcts = saved_data.get("failed_runs", {}).get("max_mass_pct_of_nariai", [])
+        if successful_times or failed_times:
+            print(f"Загружено из кэша: {len(successful_times)} успешных и {len(failed_times)} провальных точек.")
+        processed_times = set([round(t, 2) for t in successful_times + failed_times])
+    else:
+        # Очищаем только свои ключи
+        saved_data["successful_runs"] = {"times_billion_years": [], "threshold_powers_w_per_kg": []}
+        saved_data["failed_runs"] = {"times_billion_years": [], "max_mass_pct_of_nariai": []}
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(saved_data, f, indent=4)
+        successful_times = []
+        threshold_powers = []
+        failed_times = []
+        failed_max_mass_pcts = []
+        processed_times = set()
+
     # Создаем космологию один раз, чтобы не загружать JSON на каждой итерации
     shared_cosmology = LambdaCDM()
     
     for t_years in times_to_test:
-        print(f"\n--- Testing Laser Start Time: {t_years/1e9:.2f} Billion Years ---")
+        t_b_years = t_years / 1e9
+        if round(t_b_years, 2) in processed_times:
+            print(f"\n--- Пропускаем: {t_b_years:.2f} млрд лет (уже посчитано) ---")
+            continue
+            
+        print(f"\n--- Testing Laser Start Time: {t_b_years:.2f} Billion Years ---")
         
         # Получаем порог мощности для данного времени старта
         required_power, best_mass = find_threshold_for_time(t_years, shared_cosmology)
@@ -276,31 +341,30 @@ def sweep_time_limits():
             failed_times.append(t_years / 1e9)
             failed_max_mass_pcts.append(pct)
             
-    print("\n=== SWEEP COMPLETED ===")
-    
-    data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
-    os.makedirs(data_dir, exist_ok=True)
-    
-    # Сохраняем сырые данные (и успешные, и провальные) в единый JSON
-    json_path = os.path.join(data_dir, 'nariai_threshold_sweep.json')
-    results_data = {
-        "successful_runs": {
+        # Сохраняем сырые данные после каждой временной метки в общий словарь, чтобы не потерять другие ключи
+        saved_data["successful_runs"] = {
             "times_billion_years": successful_times,
             "threshold_powers_w_per_kg": threshold_powers
-        },
-        "failed_runs": {
+        }
+        saved_data["failed_runs"] = {
             "times_billion_years": failed_times,
             "max_mass_pct_of_nariai": failed_max_mass_pcts
         }
-    }
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(results_data, f, indent=4)
-    print(f"\nДанные успешно сохранены в файл {json_path}")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(saved_data, f, indent=4)
+            
+    print("\n=== SWEEP COMPLETED ===")
+    print(f"\nИтоговые данные успешно сохранены в файл {json_path}")
     
     if successful_times:
         try:
+            # Сортируем данные по времени перед отрисовкой
+            sorted_indices = np.argsort(successful_times)
+            sorted_times = np.array(successful_times)[sorted_indices]
+            sorted_powers = np.array(threshold_powers)[sorted_indices]
+            
             plt.figure(figsize=(10, 6))
-            plt.plot(successful_times, threshold_powers, marker='o', linestyle='-', color='r')
+            plt.plot(sorted_times, sorted_powers, marker='o', linestyle='-', color='r')
             
             # Логарифмическая шкала Y для наглядности (мощности могут сильно отличаться)
             plt.yscale('log')
@@ -322,8 +386,13 @@ def sweep_time_limits():
 
     if failed_times:
         try:
+            # Сортируем данные по времени перед отрисовкой
+            sorted_indices = np.argsort(failed_times)
+            sorted_times = np.array(failed_times)[sorted_indices]
+            sorted_pcts = np.array(failed_max_mass_pcts)[sorted_indices]
+            
             plt.figure(figsize=(10, 6))
-            plt.plot(failed_times, failed_max_mass_pcts, marker='o', linestyle='-', color='b')
+            plt.plot(sorted_times, sorted_pcts, marker='o', linestyle='-', color='b')
             
             plt.title('Max Achievable BH Mass vs Laser Start Time (When Power is Infinite)')
             plt.xlabel('Laser Start Time (Billion Years)')
@@ -344,4 +413,8 @@ def sweep_time_limits():
             pass
 
 if __name__ == "__main__":
-    sweep_time_limits()
+    parser = argparse.ArgumentParser(description="Find Nariai threshold over time.")
+    parser.add_argument('--force', action='store_true', help='Force recalculation and clear cache')
+    args = parser.parse_args()
+    
+    sweep_time_limits(force=args.force)

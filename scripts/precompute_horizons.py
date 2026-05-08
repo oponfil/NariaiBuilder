@@ -20,20 +20,20 @@ from utils.constants import (
     SECONDS_PER_YEAR,
 )
 from utils.cosmology_utils import calculate_scale_factor_at_time
-import config
 
-# Диапазон времен для предвычисления (в годах) - берем из config
-_TIME_START_YEARS = config.PRECOMPUTE_TIME_START_YEARS
-_TIME_END_YEARS = config.PRECOMPUTE_TIME_END_YEARS
+# =============================================================================
+# Предрасчёт горизонтов (годы)
+# =============================================================================
+PRECOMPUTE_DT_YEARS = 1e6  # 1 миллион лет
+PRECOMPUTE_TIME_START_YEARS = PRECOMPUTE_DT_YEARS
+PRECOMPUTE_TIME_END_YEARS = 150e9
+
+_TIME_START_YEARS = PRECOMPUTE_TIME_START_YEARS
+_TIME_END_YEARS = PRECOMPUTE_TIME_END_YEARS
 
 # Вычисляем количество точек для сетки предвычисления горизонтов.
-# Количество точек рассчитывается из желаемого шага симуляции (config.DT_YEARS),
-# но ограничивается снизу (чтобы интерполяция не была слишком грубой для коротких симуляций)
-# и сверху (чтобы не тратить лишнее время на прекомпиляцию и не раздувать кэш-файлы).
-_MIN_PRECOMPUTE_POINTS = 1000
-_MAX_PRECOMPUTE_POINTS = 100000
-_calculated_points = int((_TIME_END_YEARS - _TIME_START_YEARS) / config.DT_YEARS)
-_NUM_POINTS = max(_MIN_PRECOMPUTE_POINTS, min(_MAX_PRECOMPUTE_POINTS, _calculated_points))
+# Количество точек рассчитывается из желаемого шага симуляции (PRECOMPUTE_DT_YEARS).
+_NUM_POINTS = int((_TIME_END_YEARS - _TIME_START_YEARS) / PRECOMPUTE_DT_YEARS)
 
 # Константы для численного интегрирования горизонтов
 _MIN_TIME_YEARS = 1e6

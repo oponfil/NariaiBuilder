@@ -20,6 +20,7 @@ from utils.constants import (
     OMEGA_B,
     OMEGA_DM,
     OMEGA_LAMBDA,
+    PLANCK_POWER_W,
     SECONDS_PER_YEAR,
 )
 
@@ -574,8 +575,9 @@ class MatterPoints:
         if self.t_laser_start_seconds is None or self._laser_start_r_phys is None:
             return None
 
+        limit_to_planck = getattr(config, 'LIMIT_TOTAL_POWER_TO_PLANCK', False)
         thrust_spec = float(getattr(config, 'MATTER_THRUST_POWER_PER_KG_W', 0.0))
-        if thrust_spec <= 0.0:
+        if not limit_to_planck and thrust_spec <= 0.0:
             return None
 
         t_now_yr = float(universe_time_seconds) / SECONDS_PER_YEAR
@@ -910,9 +912,11 @@ class MatterPoints:
         #     добавляется именно E_∞/c²).
         #   • При поглощении ЦЧД: dM_bh = (E_phot_∞/c²)·a(t_emit)/a(t_now)
         #     с учётом дополнительного космологического redshift по пути.
+        limit_to_planck = getattr(config, 'LIMIT_TOTAL_POWER_TO_PLANCK', False)
         thrust_spec = float(getattr(config, 'MATTER_THRUST_POWER_PER_KG_W', 0.0))
         M_bh_total = float(getattr(self, 'accumulated_bh_mass', 0.0))
-        any_force = (thrust_spec > 0.0) or (M_bh_total > 0.0)
+        is_laser_enabled = limit_to_planck or (thrust_spec > 0.0)
+        any_force = is_laser_enabled or (M_bh_total > 0.0)
         if any_force and scale_factor > 0.0:
             radial_ok = mask_outside_bh & (dist > 1e-10)
             if np.any(radial_ok):
@@ -927,7 +931,7 @@ class MatterPoints:
                 thrust_active = np.zeros(len(physical_pts), dtype=bool)
                 laser_mass_floor_arr = None
                 burnable_mass = None
-                if thrust_spec > 0.0 and self.masses_per_point is not None:
+                if is_laser_enabled and self.masses_per_point is not None:
                     masses_current = np.asarray(self.masses_per_point, dtype=np.float64)
                     n_total = len(masses_current)
                     if (
@@ -966,10 +970,19 @@ class MatterPoints:
                     )
                     burnable_mass = burnable_mass_kg(masses_current, laser_mass_floor_arr)
                     thrust_active = radial_ok & emitter_mask & (burnable_mass > 0.0)
-                    if thrust_spec > 0.0 and np.any(thrust_active):
-                        self._last_step_nominal_sigma_p_w = float(
-                            thrust_spec * float(np.sum(masses_current[thrust_active]))
-                        )
+                    if np.any(thrust_active):
+                        if limit_to_planck:
+                            active_mass_sum = float(np.sum(masses_current[thrust_active]))
+                            if active_mass_sum > 0.0:
+                                thrust_spec = float(PLANCK_POWER_W / active_mass_sum)
+                            else:
+                                thrust_spec = 0.0
+                        if thrust_spec > 0.0:
+                            self._last_step_nominal_sigma_p_w = float(
+                                thrust_spec * float(np.sum(masses_current[thrust_active]))
+                            )
+                    elif limit_to_planck:
+                        thrust_spec = 0.0
 
                 # Релятивистский расчёт скоростей и β_radial для всех точек.
                 # Считаем здесь, чтобы (а) использовать γ для фактора 1/γ в темпе

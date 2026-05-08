@@ -56,6 +56,17 @@ To automatically find the minimum required laser specific power (W/kg) to build 
 python scripts/find_nariai_threshold.py
 ```
 
+To plot a graph showing how the final Black Hole mass depends on the laser power for a specific cosmological epoch (e.g. 13.8 billion years), run:
+
+```bash
+python scripts/plot_mass_vs_power.py
+```
+
+You can specify a different cosmological epoch (time in billion years):
+```bash
+python scripts/plot_mass_vs_power.py --time 8.5
+```
+
 ## Controls
 
 - **Space** or **P** - pause/resume
@@ -107,6 +118,7 @@ Also in `config.py` you can control the randomness of the generated distribution
   - `precompute_horizons.py` - horizon precomputation
   - `bench_calculate_masses.py` - mass calculation benchmark
   - `find_nariai_threshold.py` - headless script to find the specific power threshold using binary search
+  - `plot_mass_vs_power.py` - headless script to plot BH mass vs laser power for a specific epoch
 - `tests/` - tests for cosmological calculations and matter dynamics
 
 ## Physical Models

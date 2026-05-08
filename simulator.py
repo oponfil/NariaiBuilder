@@ -82,11 +82,12 @@ def main():
             
             # Остановка, если достигнут предел времени
             from utils.constants import SECONDS_PER_YEAR
-            max_time_seconds = config.PRECOMPUTE_TIME_END_YEARS * SECONDS_PER_YEAR
+            from scripts.precompute_horizons import PRECOMPUTE_TIME_END_YEARS
+            max_time_seconds = PRECOMPUTE_TIME_END_YEARS * SECONDS_PER_YEAR
             if universe.time >= max_time_seconds:
                 universe.time = max_time_seconds
                 renderer.paused = True
-                safe_print(f"Time limit reached: {config.PRECOMPUTE_TIME_END_YEARS/1e9:.1f} billion years. Simulation paused.")
+                safe_print(f"Time limit reached: {PRECOMPUTE_TIME_END_YEARS/1e9:.1f} billion years. Simulation paused.")
             
             # Обновление космологии (расширение Вселенной)
             cosmology.update_scale_factor(dt)
