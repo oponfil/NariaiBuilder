@@ -506,10 +506,10 @@ class MatterPoints:
         self._set_laser_emitter_mask_inside_event_horizon()
 
     def total_laser_emitters_power_w(
-        self,
-        scale_factor: float,
-        r_black_hole_m: float | None = None,
-    ) -> float:
+        self, scale_factor: float, r_black_hole: float,
+        r_emission_boundary: float = None,
+        use_planck_limit: bool = False
+    ) -> float | None:
         """
         Номинальная суммарная мощность лазера после последнего шага симуляции (Вт):
 
@@ -715,7 +715,7 @@ class MatterPoints:
         scale_ratio: float,
         r_black_hole: float = None,
         universe_time_seconds: float = None,
-        r_event_horizon: float = None,
+        r_emission_boundary: float = None,
     ):
         """
         Обновить позиции точек на основе их скоростей и пересчитать скорости.
@@ -759,6 +759,7 @@ class MatterPoints:
             r_black_hole: Радиус горизонта черной дыры в метрах (опционально)
             universe_time_seconds: Космологическое время сейчас, нужно для
                 расчёта redshift фотонов в полёте до центра.
+            r_emission_boundary: Опциональный граничный радиус для остановки эмиссии.
         """
         if dt < 0:
             self._last_step_nominal_sigma_p_w = 0.0
@@ -949,12 +950,22 @@ class MatterPoints:
                     if le is not None and len(le) == n_total:
                         emitter_mask = np.asarray(le, dtype=bool)
 
-                    if r_event_horizon is not None and r_event_horizon > 0:
-                        outside_eh = (dist > r_event_horizon) & emitter_mask
-                        if np.any(outside_eh):
-                            emitter_mask &= ~outside_eh
-                            stopped_indices = np.flatnonzero(outside_eh)
+                    if r_emission_boundary is not None and r_emission_boundary > 0:
+                        # Выключаем тех, кто вышел за границу
+                        outside_boundary = (dist > r_emission_boundary) & emitter_mask
+                        if np.any(outside_boundary):
+                            emitter_mask &= ~outside_boundary
+                            stopped_indices = np.flatnonzero(outside_boundary)
                             mark_laser_stopped_for_indices(stopped_indices, dist)
+                            if self.laser_emitter_mask is not None:
+                                self.laser_emitter_mask[outside_boundary] = False
+                                
+                        # Включаем тех, кто вошел внутрь границы (например, сфера Хаббла догнала их)
+                        inside_boundary = (dist <= r_emission_boundary) & ~emitter_mask
+                        if np.any(inside_boundary):
+                            emitter_mask |= inside_boundary
+                            if self.laser_emitter_mask is not None:
+                                self.laser_emitter_mask[inside_boundary] = True
 
                     fresh_laser = radial_ok & emitter_mask & np.isnan(self._laser_start_mass_kg)
                     if np.any(fresh_laser):

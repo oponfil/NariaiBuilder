@@ -2,22 +2,24 @@
 Скрипт для предвычисления космологических горизонтов
 Вычисляет горизонты один раз и сохраняет в файл для быстрого доступа
 """
-import sys
+import json
 import os
-
-# Добавляем корневую директорию в путь
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 from scipy import integrate
-import json
+
+try:
+    import _bootstrap  # noqa: F401  -- python scripts/<name>.py
+except ModuleNotFoundError:
+    from scripts import _bootstrap  # noqa: F401  -- from scripts.<name> import ...
+
 from utils.constants import (
-    OMEGA_LAMBDA,
-    OMEGA_DM,
-    OMEGA_B,
     H0_s,
-    c,
+    OMEGA_B,
+    OMEGA_DM,
+    OMEGA_LAMBDA,
     SECONDS_PER_YEAR,
+    c,
 )
 from utils.cosmology_utils import calculate_scale_factor_at_time
 

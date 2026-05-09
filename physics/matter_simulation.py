@@ -476,14 +476,19 @@ class MatterSimulation:
             scale_factor = cosmology.scale_factor
             particle_horizon_physical = cosmology.particle_horizon(universe.time)
             scale_ratio = self._calculate_scale_ratio(universe, cosmology, particle_horizon_physical)
-            r_event_horizon = cosmology.cosmological_event_horizon(universe.time)
+            boundary_type = getattr(config, 'EMISSION_BOUNDARY', 'event')
+            if boundary_type == 'hubble':
+                r_emission_boundary = cosmology.hubble_horizon(universe.time)
+            else:
+                r_emission_boundary = cosmology.cosmological_event_horizon(universe.time)
+                
             self.matter_points.update_positions_and_velocities(
                 dt_step_signed,
                 scale_factor,
                 scale_ratio,
                 r_black_hole,
                 universe_time_seconds=universe.time,
-                r_event_horizon=r_event_horizon,
+                r_emission_boundary=r_emission_boundary,
             )
             self.last_collapse_time = universe.time
             return
@@ -502,11 +507,17 @@ class MatterSimulation:
             
             if not paused and self.matter_points.points_comoving is not None:
                 dt = dt_step_signed if dt_step_signed is not None else get_dt()
-                r_event_horizon = cosmology.cosmological_event_horizon(universe.time)
+                
+                boundary_type = getattr(config, 'EMISSION_BOUNDARY', 'event')
+                if boundary_type == 'hubble':
+                    r_emission_boundary = cosmology.hubble_horizon(universe.time)
+                else:
+                    r_emission_boundary = cosmology.cosmological_event_horizon(universe.time)
+                    
                 self.matter_points.update_positions_and_velocities(
                     dt, scale_factor, scale_ratio, r_black_hole,
                     universe_time_seconds=universe.time,
-                    r_event_horizon=r_event_horizon,
+                    r_emission_boundary=r_emission_boundary,
                 )
             
             self.last_collapse_time = universe.time
