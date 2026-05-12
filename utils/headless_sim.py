@@ -64,19 +64,15 @@ def _calculate_masses(calc: MassCalculator, universe: Universe,
                       cosmology: LambdaCDM, sim: MatterSimulation) -> dict:
     """Тонкий адаптер вокруг `MassCalculator.calculate_masses`.
 
-    `MassCalculator` ожидает три колбэка для работы с матерью; тут мы просто
-    привязываем их к текущим объектам, чтобы не дублировать сигнатуры.
+    `MassCalculator` ожидает один колбэк — ленивую инициализацию точек
+    материи; привязываем его к текущим объектам.
     """
     return calc.calculate_masses(
         universe,
         cosmology,
         sim.matter_points,
         False,  # paused
-        lambda particle_horizon_physical: sim.get_physical_points_and_distances(
-            universe, cosmology, particle_horizon_physical),
         lambda: sim.initialize_matter_points(universe, cosmology),
-        lambda num_new_points, radius_physical: sim.add_matter_points(
-            universe, cosmology, num_new_points, radius_physical),
     )
 
 
@@ -91,11 +87,9 @@ def _viable_photons_remaining(sim: MatterSimulation, cosmology: LambdaCDM,
     if mp._laser_photon_chi is None or len(mp._laser_photon_chi) == 0:
         return 0
     photon_distances = mp._laser_photon_chi * cosmology.scale_factor
-    boundary_type = getattr(config, 'EMISSION_BOUNDARY', 'event')
-    if boundary_type == 'hubble':
-        r_boundary = cosmology.hubble_horizon(universe_time)
-    else:
-        r_boundary = cosmology.cosmological_event_horizon(universe_time)
+    universe = Universe()
+    universe.time = universe_time
+    r_boundary = sim._emission_boundary_radius(universe, cosmology)
     return int(np.sum(photon_distances <= r_boundary))
 
 

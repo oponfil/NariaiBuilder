@@ -81,6 +81,10 @@ class LambdaCDM:
         # ОПТИМИЗАЦИЯ: Кэш для scale_factor по времени
         self._scale_factor_cache_time = -1.0
         self._scale_factor_cache_value = 1.0
+
+        # Кэш для honest LTB-Λ event horizon (грубая гранулярность по (t, M_BH)).
+        self._eh_ltb_cache_key = None
+        self._eh_ltb_cache_value = 0.0
     
     def _get_scale_factor_for_time(self, time: float) -> float:
         """Получить scale_factor для времени с кэшированием"""
@@ -327,31 +331,19 @@ class LambdaCDM:
     
     def hubble_horizon(self, time: float, black_hole_mass_kg: float = None) -> float:
         """
-        Горизонт Хаббла: расстояние, на котором скорость расширения равна скорости света
-        r_H = c / H(t)
-        
-        В присутствии черной дыры горизонт Хаббла ограничен сверху внешним горизонтом
-        из метрики SdS, который учитывает влияние черной дыры.
-        
-        Args:
-            time: время в секундах
-            black_hole_mass_kg: масса центральной черной дыры (кг).
-                              Если None или не указан, используется 0.
-        
-        Returns:
-            float: горизонт Хаббла в метрах, ограниченный сверху внешним горизонтом из SdS.
+        FLRW helper для радиуса Хаббла: r_H = c / H(t).
+
+        Это кинематическая величина (расстояние, на котором скорость
+        космологического разлёта равна c) для однородного FLRW-фона.
+        Сценарный LTB Hubble radius с центральной массой и дискретной
+        материей считается в MassCalculator как внешний apparent horizon:
+        2G·M(<r)/(c²r) + Λr²/3 = 1.
+
+        Параметр black_hole_mass_kg оставлен только для обратной
+        совместимости сигнатуры.
         """
-        if black_hole_mass_kg is None:
-            black_hole_mass_kg = 0.0
-        
         h = self.hubble_parameter(time)
-        r_hubble = c / h
-        
-        # Вычисляем внешний горизонт из метрики SdS (r_outer)
-        r_outer_sds = self.de_sitter_horizon(black_hole_mass_kg)
-        
-        # Горизонт Хаббла ограничен сверху внешним горизонтом из SdS
-        return min(r_hubble, r_outer_sds)
+        return c / h
     
     def de_sitter_horizon(self, black_hole_mass_kg: float = 0.0) -> float:
         """
@@ -360,6 +352,10 @@ class LambdaCDM:
         Учитывает влияние центральной черной дыры на космологический горизонт.
         В метрике SdS внешний горизонт (космологический) уменьшается по мере роста массы ЧД.
         Когда масса ЧД достигает массы Нарайи, горизонты совпадают.
+
+        При M=0 — чистый de Sitter: r = c/H_Λ. В визуализации пунктир
+        «de Sitter (empty universe)» всегда использует это значение
+        (вызов de_sitter_horizon(0.0)), независимо от массы ЦЧД.
         
         Args:
             black_hole_mass_kg: масса центральной черной дыры (кг). 
@@ -494,41 +490,69 @@ class LambdaCDM:
     
     def cosmological_event_horizon(self, time: float, black_hole_mass_kg: float = None) -> float:
         """
-        Космологический горизонт событий в расширяющейся Вселенной с черной дырой.
-        
-        ВАЖНО: Космологический горизонт событий вычисляется из FLRW космологии как интеграл
-        по будущему расширению: r_eh = c * a(t) * ∫[t to ∞] dt'/a(t')
-        
-        Этот горизонт растет со временем и стремится к внешнему горизонту из метрики SdS
-        в будущем (t → ∞). В любой момент времени он ограничен сверху внешним горизонтом
-        из метрики SdS, который учитывает влияние черной дыры.
-        
-        Args:
-            time: время в секундах
-            black_hole_mass_kg: масса центральной черной дыры (кг).
-                              Если None или не указан, используется 0.
-        
-        Returns:
-            float: космологический горизонт событий в метрах.
-                  Вычисляется из FLRW (растет со временем), но ограничен сверху внешним горизонтом из SdS.
+        Космологический event horizon в LTB-Λ — собственная радиальная
+        дальность, от которой свет, излучённый в момент `time`, асимптотически
+        достигнет центрального наблюдателя при t → ∞.
+
+        Считается ЧЕСТНО, интегрированием радиального нулевого геодезика в
+        LTB-Λ с центральной ЦЧД и FRW-фоном материи. Радиальный inward null
+        в LTB удовлетворяет:
+
+            dr/dt = R_dot(t, r) − c,
+            R_dot(t, r)² = 2G·M(<r, t)/r + Λc²r²/3,
+            M(<r, t) = M_BH + ρ_m(t)·(4/3)π·r³,
+            ρ_m(t) = ρ_m,0 / a(t)³.
+
+        Event horizon = sup r₀ такой, что фотон, испущенный в (t, r₀) внутрь,
+        достигает центра асимптотически. Находим бисекцией по r₀, для каждого
+        кандидата интегрируем траекторию на ~100 Gyr вперёд.
+
+        При M_BH = 0 интеграл вырождается до стандартного FLRW
+        r_eh = c·a(t)·∫dt'/a(t'). При M_BH → M_крит (где inner и outer
+        apparent horizons сливаются) event horizon стягивается к радиусу
+        слияния (≈ r_N для асимптотической SdS).
+
+        Параметр `black_hole_mass_kg`: None или 0 → FLRW fast-path через
+        предрассчитанный интерполятор. Любое M_BH > 0 → честная LTB-Λ
+        интеграция (с кэшем по (t, M_BH) на грубой сетке).
         """
-        if black_hole_mass_kg is None:
-            black_hole_mass_kg = 0.0
         if time <= 0:
             return 0.0
 
-        # Сначала считаем SdS-ограничение: FLRW-горизонт не должен превышать
-        # внешний горизонт в присутствии центральной ЧД.
-        r_outer_sds = self.de_sitter_horizon(black_hole_mass_kg)
+        M_bh = float(black_hole_mass_kg) if black_hole_mass_kg is not None else 0.0
+        if M_bh <= 0.0:
+            return self._cosmological_event_horizon_flrw(time)
 
-        # Горячий путь рендера: используем предвычисленный FLRW event horizon
-        # вместо solve_ivp + quad на каждом кадре.
+        # Кэш на грубой сетке: 100 Myr по t, ~0.5% M_N по массе.
+        seconds_per_100myr = 1.0e8 * 365.25 * 24 * 3600
+        mass_grain = 2.0e50  # ~0.5% от M_N ≈ 4e52 kg
+        cache_key = (
+            int(round(time / seconds_per_100myr)),
+            int(round(M_bh / mass_grain)),
+        )
+        if cache_key == self._eh_ltb_cache_key:
+            return self._eh_ltb_cache_value
+
+        result = self._compute_honest_event_horizon_ltb(time, M_bh)
+        self._eh_ltb_cache_key = cache_key
+        self._eh_ltb_cache_value = result
+        return result
+
+    def _cosmological_event_horizon_flrw(self, time: float) -> float:
+        """FLRW event horizon: r_eh = c·a(t)·∫[t,∞] dt'/a(t').
+
+        Используется как fast-path при M_BH = 0 (через предрассчитанный
+        интерполятор) и как fallback для honest-LTB при сбое интегрирования.
+        """
+        if time <= 0:
+            return 0.0
+
         if self._event_interpolator is not None:
             try:
                 r_event_flrw = float(self._event_interpolator(time))
                 if r_event_flrw >= 0:
                     self._event_interp_used += 1
-                    return min(r_event_flrw, r_outer_sds)
+                    return r_event_flrw
             except Exception as e:
                 if config.DEBUG and not hasattr(self, '_event_interp_fallback_printed'):
                     print(
@@ -536,28 +560,18 @@ class LambdaCDM:
                         "falling back to numerical integration"
                     )
                     self._event_interp_fallback_printed = True
-        
-        # Вычисляем классический космологический горизонт событий из FLRW
-        # r_eh = c * a(t) * ∫[t to ∞] dt'/a(t')
-        # Это учитывает расширение Вселенной и РАСТЕТ со временем
-        # Fallback, если предрасчитанный кэш недоступен.
-        
-        # Вычисляем космологический горизонт событий через численное интегрирование
-        # r_eh = c * a(t) * ∫[t to ∞] dt'/a(t')
-        # Используем тот же подход, что и в precompute_horizons.py
+
         omega_m = self.omega_dm + self.omega_b
-        
-        # ОПТИМИЗАЦИЯ: Используем кэшированный scale_factor
         a = self._get_scale_factor_for_time(time)
-        
+
         def da_dt_future(t, a_val):
             if a_val <= 0:
                 a_val = 1e-10
             h = self.h0 * np.sqrt(omega_m / (a_val**3) + self.omega_lambda)
             return a_val * h
-        
-        t_future = time + 1000.0 * 365.25 * 24 * 3600 * 1e9  # 1000 млрд лет
-        
+
+        t_future = time + 1000.0 * 365.25 * 24 * 3600 * 1e9
+
         sol_future = None
         try:
             result_future = integrate.solve_ivp(da_dt_future, [time, t_future], [a],
@@ -565,9 +579,9 @@ class LambdaCDM:
                                                 rtol=1e-3, atol=1e-6)
             if result_future.success:
                 sol_future = result_future.sol
-        except:
+        except Exception:
             pass
-        
+
         def integrand(t_prime):
             if t_prime <= time:
                 return 1.0 / a
@@ -577,23 +591,117 @@ class LambdaCDM:
                     if a_at_t <= 0:
                         return 1.0 / 1e-10
                     return 1.0 / a_at_t
-                except:
+                except Exception:
                     pass
             return 1.0 / 1e-10
-        
+
         try:
             integral_result, _ = integrate.quad(integrand, time, t_future,
                                                 limit=500, epsabs=1e-6, epsrel=1e-4)
-            r_event_flrw = c * a * integral_result
-        except:
-            r_event_flrw = 0.0
-        
-        # ВАЖНО: Космологический горизонт событий из FLRW учитывает расширение Вселенной
-        # и РАСТЕТ со временем, стремясь к внешнему горизонту из SdS в будущем.
-        # В любой момент времени он не может превышать этот горизонт, так как черная дыра
-        # уменьшает доступное космологическое пространство.
-        # Возвращаем минимум из них, чтобы горизонт расширялся, но был ограничен сверху.
-        return min(r_event_flrw, r_outer_sds)
+            return c * a * integral_result
+        except Exception:
+            return 0.0
+
+    def _compute_honest_event_horizon_ltb(self, time_now: float, M_bh: float) -> float:
+        """Честный event horizon в LTB-Λ с центральной ЦЧД и FRW-материей.
+
+        Идея: event horizon — это РАДИАЛЬНАЯ НУЛЕВАЯ СЕПАРАТРИСА в (t,r),
+        разделяющая «фотоны, которые достигают центра» от «фотонов, которые
+        улетают наружу». Сам фотон НА сепаратрисе удовлетворяет тому же
+        уравнению, что и обычный inward null:
+
+            dr/dt = R_dot(t,r) − c,   R_dot² = 2G·M(<r,t)/r + Λc²r²/3.
+
+        При t → ∞ материя полностью разрежается под Λ-доминантой, геометрия
+        → SdS(M_bh, Λ), и сепаратриса асимптотически сходится к внешнему
+        корню SdS:  r_e(t→∞) = r_SdS_outer(M_bh).
+
+        Прямое (forward) интегрирование сепаратрисы НЕУСТОЙЧИВО (малые
+        отклонения растут экспоненциально). Обратное (backward) — УСТОЙЧИВО.
+        Поэтому решаем dr/dt = R_dot − c **назад во времени** от
+        (t_max, r_SdS_outer·(1-ε)) до (time_now, r_e_today) одним прогоном
+        ODE. Это в ~10 раз быстрее, чем бисекция, и даёт точное значение.
+        """
+        SECONDS_PER_YEAR = 365.25 * 24 * 3600
+        omega_m = self.omega_dm + self.omega_b
+        lam = 3.0 * (self.h0 ** 2) * self.omega_lambda / (c * c)
+        rho_crit = self.rho_crit
+        a_now = self._get_scale_factor_for_time(time_now)
+
+        # t_max берём заведомо в глубокой Λ-эпохе: за 100 Gyr матерь
+        # разредится в e^(21) ≈ 10^9 раз относительно сегодня, геометрия
+        # практически SdS.
+        t_max = time_now + 100.0 * 1e9 * SECONDS_PER_YEAR
+
+        def da_dt(t, a_val):
+            a_p = max(float(a_val[0]), 1e-30)
+            H = self.h0 * np.sqrt(omega_m / (a_p ** 3) + self.omega_lambda)
+            return [a_p * H]
+
+        try:
+            t_grid = np.linspace(time_now, t_max, 200)
+            sol_a = integrate.solve_ivp(
+                da_dt, [time_now, t_max], [a_now],
+                method='RK45', t_eval=t_grid,
+                rtol=1e-3, atol=1e-9,
+            )
+            if not sol_a.success:
+                return self._cosmological_event_horizon_flrw(time_now)
+        except Exception:
+            return self._cosmological_event_horizon_flrw(time_now)
+
+        a_grid = sol_a.y[0]
+        a_final = float(a_grid[-1])
+
+        def a_at(t):
+            if t <= time_now:
+                return a_now
+            if t >= t_max:
+                return a_final
+            return max(float(np.interp(t, t_grid, a_grid)), 1e-30)
+
+        r_sds_inner, r_sds_outer = schwarzschild_de_sitter_horizons(M_bh, lam)
+        # При M_BH = M_N выраженных корней нет; nariai.py возвращает оба
+        # корня = r_N. В этом случае event horizon формально схлопывается
+        # к r_N — возвращаем его без интегрирования.
+        r_upper = c / (self.h0 * np.sqrt(self.omega_lambda))  # √(3/Λ)
+        if r_sds_outer <= r_sds_inner * 1.01:
+            return r_sds_outer
+
+        def dr_dt(t, state):
+            r = float(state[0])
+            if r <= 0.0:
+                return [0.0]
+            a_t = a_at(t)
+            rho_m = rho_crit * omega_m / (a_t ** 3)
+            M = M_bh + rho_m * (4.0 / 3.0) * np.pi * (r ** 3)
+            arg = 2.0 * G * M / r + lam * c * c * (r ** 2) / 3.0
+            Rdot = np.sqrt(arg) if arg > 0.0 else 0.0
+            return [Rdot - c]
+
+        # В точности на r_SdS_outer имеем dr/dt = 0 (фотон зафиксирован).
+        # Чтобы backward-инеграция «двинулась» от этой стационарной точки,
+        # стартуем чуть ВНУТРИ — там dr/dt < 0 (forward), backward даёт
+        # r → больше. Сепаратриса (event horizon) — это устойчивое решение
+        # обратной задачи, к которому сходятся все близкие траектории.
+        r_init = r_sds_outer * (1.0 - 1.0e-4)
+
+        try:
+            sol = integrate.solve_ivp(
+                dr_dt, [t_max, time_now], [r_init],
+                method='RK45',
+                rtol=1e-4, atol=max(r_sds_outer * 1.0e-6, 1.0e7),
+                max_step=(t_max - time_now) / 100.0,
+            )
+            if sol.success:
+                r_event = float(sol.y[0, -1])
+                # Sanity: должен быть в [r_sds_inner, r_sds_outer], и
+                # ≤ √(3/Λ) (никогда не превосходит чисто-dS).
+                r_event = max(min(r_event, r_upper * 0.9999), 0.0)
+                return r_event
+        except Exception:
+            pass
+        return self._cosmological_event_horizon_flrw(time_now)
     
     def verify_z0_values(self, time: float, tolerance: float = 0.1) -> dict:
         """

@@ -34,19 +34,32 @@ class HorizonsRenderer:
         TEN_BILLION_LY = get_ten_billion_ly()
         RULER_LENGTH_PX = ui.RULER_LENGTH_PX
         
-        # Получаем массу ЧД
+        # Получаем единый снимок масс/радиусов. LTB Hubble radius зависит от
+        # профиля материи и лазерных фотонов, поэтому его нельзя восстановить
+        # прямым cosmology.hubble_horizon(time).
         if masses is None:
-            masses_temp = renderer.calculate_masses(universe, cosmology)
-            M_black_hole_kg = masses_temp.get('M_black_hole_kg', 0.0) if masses_temp else 0.0
+            masses = renderer.calculate_masses(universe, cosmology)
+        if masses:
+            M_black_hole_kg = masses.get('M_black_hole_kg', 0.0)
         else:
-            M_black_hole_kg = masses.get('M_black_hole_kg', 0.0) if masses else 0.0
+            M_black_hole_kg = 0.0
         
         try:
-            # Вычисляем все горизонты
-            hubble_r = float(str(cosmology.hubble_horizon(universe.time, M_black_hole_kg)))
-            de_sitter_r = float(str(cosmology.de_sitter_horizon(M_black_hole_kg)))
-            particle_r = float(str(cosmology.particle_horizon(universe.time)))
-            event_r = float(str(cosmology.cosmological_event_horizon(universe.time, M_black_hole_kg)))
+            # Hubble берём из MassCalculator: это LTB outer apparent horizon.
+            hubble_r = (
+                masses.get('r_hubble_horizon_m', 0.0)
+                if masses else float(str(cosmology.hubble_horizon(universe.time, M_black_hole_kg)))
+            )
+            # Пунктир «de Sitter (empty universe)» — эталон Λ без центральной массы.
+            de_sitter_r = float(str(cosmology.de_sitter_horizon(0.0)))
+            particle_r = (
+                masses.get('r_particle_horizon_m', 0.0)
+                if masses else float(str(cosmology.particle_horizon(universe.time)))
+            )
+            event_r = (
+                masses.get('r_event_horizon_m', 0.0)
+                if masses else float(str(cosmology.cosmological_event_horizon(universe.time, M_black_hole_kg)))
+            )
             
             # Проверяем на NaN и Inf
             if not np.isfinite(hubble_r) or hubble_r < 0:
@@ -87,7 +100,7 @@ class HorizonsRenderer:
             
             self._draw_horizon(center_x, center_y, de_sitter_r, scale_radius,
                              ui.HORIZON_DE_SITTER_COLOR, ui.HORIZON_DE_SITTER_LABEL,
-                             ui.HORIZON_DE_SITTER_OFFSET_Y, cosmology=cosmology)
+                             ui.HORIZON_DE_SITTER_OFFSET_Y, cosmology=cosmology, is_dashed=True)
             
             self._draw_horizon(center_x, center_y, event_r, scale_radius,
                              ui.HORIZON_EVENT_COLOR, ui.HORIZON_EVENT_LABEL,
@@ -106,7 +119,7 @@ class HorizonsRenderer:
         except (ValueError, TypeError) as e:
             pass
     
-    def _draw_horizon(self, center_x, center_y, radius_physical, scale_func, color, label, offset_y, cosmology=None):
+    def _draw_horizon(self, center_x, center_y, radius_physical, scale_func, color, label, offset_y, cosmology=None, is_dashed=False):
         """Отрисовать один космологический горизонт"""
         renderer = self.renderer
         
@@ -119,13 +132,40 @@ class HorizonsRenderer:
                 # Проверяем видимость
                 if (center_x_int + radius_int >= 0 and center_x_int - radius_int < renderer.width and
                     center_y_int + radius_int >= 0 and center_y_int - radius_int < renderer.height):
-                    pygame.draw.circle(
-                        renderer.screen, 
-                        color, 
-                        (center_x_int, center_y_int), 
-                        radius_int, 
-                        width=ui.HORIZON_LINE_WIDTH
-                    )
+                    if is_dashed:
+                        dash_length = 15
+                        circumference = 2 * np.pi * radius_int
+                        dashes = int(circumference / dash_length)
+                        if dashes % 2 != 0:
+                            dashes += 1
+                        if dashes > 0:
+                            angle_step = 2 * np.pi / dashes
+                            # Предрасчет углов и координат
+                            angles = np.arange(0, 2 * np.pi, angle_step)
+                            xs = center_x_int + radius_int * np.cos(angles)
+                            ys = center_y_int + radius_int * np.sin(angles)
+                            
+                            width = renderer.width
+                            height = renderer.height
+                            
+                            # Рисуем только те сегменты, которые могут быть на экране
+                            for i in range(0, len(xs)-1, 2):
+                                x1, y1 = xs[i], ys[i]
+                                x2, y2 = xs[i+1], ys[i+1]
+                                
+                                # Простая AABB проверка видимости
+                                if max(x1, x2) < 0 or min(x1, x2) > width or max(y1, y2) < 0 or min(y1, y2) > height:
+                                    continue
+                                    
+                                pygame.draw.line(renderer.screen, color, (int(x1), int(y1)), (int(x2), int(y2)), ui.HORIZON_LINE_WIDTH)
+                    else:
+                        pygame.draw.circle(
+                            renderer.screen, 
+                            color, 
+                            (center_x_int, center_y_int), 
+                            radius_int, 
+                            width=ui.HORIZON_LINE_WIDTH
+                        )
                 
                 # Название и радиус
                 label_x = center_x_int + radius_int + 5

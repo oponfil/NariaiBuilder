@@ -22,11 +22,11 @@ The logic of the simulation is based on building a black hole by emitting photon
 - **2D visualization of matter points** projected onto the screen
 - **Info Panel**: current cosmological parameters, CMB temperature, and masses inside horizons
 - **Cosmological Horizons**:
-  - Hubble Horizon (r_H = c/H(t))
-  - Cosmological Event Horizon (limitation due to accelerated expansion)
-  - de Sitter Horizon (r_dS = c/√(Λ/3))
+  - LTB Hubble / outer apparent horizon from the full `M(<r)` profile
+  - LTB Event horizon as a radial null separatrix in the same LTB geometry
+  - de Sitter Horizon (`r_dS = c/√(Λ/3)`) as the empty-Λ reference scale
   - Particle Horizon (maximum distance light has traveled)
-- Schwarzschild-de Sitter horizons for the central black hole
+- LTB apparent horizons for the central black hole and the cosmological outer boundary
 - Laser feeding of the central black hole with discrete photon packets
 - Precomputed horizon caches to speed up the simulation
 
@@ -98,10 +98,11 @@ Also in `config.py` you can control the randomness of the generated distribution
 - `physics/` - physical models
   - `objects.py` - `Universe` class (cosmological simulation time)
   - `cosmology.py` - Lambda CDM parameters (Universe expansion, dark energy)
+  - `apparent_horizon.py` - LTB apparent horizons and LTB event/null horizon helpers
   - `matter_simulation.py` - generation and management of matter points
   - `matter_points.py` - dynamics of matter points, laser emitters, and photons
   - `mass_calculator.py` - calculation of masses inside horizons and the CBH
-  - `nariai.py` - calculations of the Nariai limit (SdS) and "mass above background"
+  - `nariai.py` - reference vacuum SdS/Nariai calculations
 - `visualization/` - visualization
   - `ui.py` - colors, labels, and UI geometry (window, rulers, horizons)
   - `renderer.py` - rendering with pygame
@@ -127,14 +128,14 @@ Also in `config.py` you can control the randomness of the generated distribution
 - Flat ΛCDM model with matter and dark energy
 - Planck 2018 + BAO parameters: H₀ = 67.4 km/s/Mpc, Ω_Λ = 0.685, Ω_DM = 0.266, Ω_B = 0.049
 - Scale factor a(t) is calculated from the Friedmann equation
-- Hubble parameter H(t)
-- Precomputed tables with interpolation are used for horizons
+- `H(t)` and precomputed FLRW horizon tables remain available as background/reference helpers
+- Scenario horizons are calculated from the current LTB state rather than by cherry-picking FLRW/SdS radii
 
 ### Matter Points and Laser
 - **Strictly radial model**: matter is represented by discrete points moving strictly toward or away from the center (no angular momentum or orbits).
-- **Laser emitter selection**: points inside the cosmological event horizon `χ < χ_event` are automatically selected. Photons from the rest will be carried away by expansion and will never reach the CBH.
+- **Laser emitter selection**: `EMISSION_BOUNDARY = "event"` selects points inside the LTB Event horizon; `"hubble"` selects points inside the LTB Hubble / outer apparent horizon. Both boundaries are computed from the same LTB mass profile, not from the FLRW event horizon helper.
 - **Hubble drag**: the peculiar momentum of points scales as `p_pec ∝ 1/a` between steps for correct expansion accounting (works up to `v→c`).
-- **CBH Gravity**: a hybrid model is used (ΛCDM background + full Schwarzschild-de Sitter radial geodesic). Gravitational time dilation (lapse `√f`) is accounted for strictly according to the SdS metric.
+- **CBH Gravity and capture**: the apparent horizon is found from the full LTB condition `2G·M(<r)/(c²r) + Λr²/3 = 1`. Matter and in-flight photon energy inside the inner apparent horizon are captured by the CBH.
 - **Relativistic laser model ("photon rocket")**: SR and GR effects are strictly accounted for:
   - Rest mass loss includes relativistic dilation (`1/γ`) and gravitational time dilation at the source (`√f`).
   - Coordinate photon energy (contribution to BH mass) accounts for the Doppler effect (`γ(1−β_r)`) and gravitational shift.
@@ -147,14 +148,17 @@ Also in `config.py` you can control the randomness of the generated distribution
 - 2D display of matter points projected onto the screen. Colors distinguish the position of points relative to horizons.
 
 ### Cosmological Horizons and the Nariai Limit
-- 4 horizons are tracked: Hubble, Event, de Sitter, Particle.
-- The project calculates the classic vacuum Nariai mass `M_N = c² / (3G√Λ)`. The CBH mass in the info panel is shown as a fraction of this limit.
+- 4 horizons are tracked: LTB Hubble, LTB Event, empty-universe de Sitter reference, and Particle.
+- **LTB Hubble / outer apparent horizon** is the outermost root of `g(r)=0`, where `g(r) = 2G·M(<r)/(c²r) + Λr²/3 − 1`.
+- **LTB Event horizon** is computed separately as a radial null separatrix by integrating `dr/dt = R_dot − c` backward from a late-time LTB outer apparent horizon.
+- **BH Event** in the visualization is the inner LTB apparent horizon, not a vacuum SdS cap.
+- The project still reports the classic vacuum Nariai mass `M_N = c² / (3G√Λ)` as a reference scale. It is not used as a dynamic hard cap for the LTB horizon evolution.
 
 ## Constraints
 
 The simulation uses simplified models and 2D visualization. Conscious deviations from strict cosmology include:
 
 - **Radiation epoch is ignored** (`Ω_r ≈ 0`). The simulation starts deep in the matter-dominated epoch ($t=1$ billion years, $z \approx 5.7$), where the relative contribution of radiation is negligible.
-- **No matter self-gravity**: points are attracted only to the CBH. Background density is accounted for in the Friedmann equation, but N-body interaction (galaxy formation) is not modeled.
-- **Bypassing the "frozen-at-horizon" singularity**: in Schwarzschild coordinate time, a falling point infinitely approaches the horizon. To prevent the simulation from "freezing", gravitational time dilation (lapse) is bounded below (`√f_min = 0.01`). This allows the point to cross the horizon in a finite number of steps.
+- **No N-body structure formation**: matter points do not gravitationally interact with each other as galaxies or clusters. Their mass-energy is included in the spherical LTB `M(<r)` profile used for horizons.
+- **LTB event horizon is predictive**: a true event horizon is global and depends on the future spacetime. The live simulation estimates it by evolving the current LTB mass profile forward and integrating the null separatrix backward.
 - **2D visualization for 3D calculation**: vectors are calculated in 3D (radially) but rendered as a projection on the screen.

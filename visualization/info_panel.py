@@ -233,6 +233,33 @@ class InfoPanel:
         if len(candidate_indices) == 0:
             return None
         return int(candidate_indices[np.argmin(distances[candidate_indices])])
+
+    def _farthest_laser_emitter_index(self, scale_factor: float) -> int | None:
+        """Индекс самой дальней точки среди испускателей лазера (маска laser_emitter_mask)."""
+        renderer = self.renderer
+        try:
+            mp = renderer.matter_points
+            points_comoving = getattr(mp, 'points_comoving', None)
+            laser_mask = getattr(mp, 'laser_emitter_mask', None)
+        except AttributeError:
+            return None
+        if (
+            points_comoving is None
+            or len(points_comoving) == 0
+            or scale_factor <= 0
+        ):
+            return None
+        points = np.asarray(points_comoving, dtype=np.float64)
+        distances = np.sqrt(np.einsum('ij,ij->i', points, points))
+        candidate_mask = np.ones(len(distances), dtype=bool)
+        if laser_mask is not None and len(laser_mask) == len(candidate_mask):
+            laser_candidates = candidate_mask & np.asarray(laser_mask, dtype=bool)
+            if np.any(laser_candidates):
+                candidate_mask = laser_candidates
+        candidate_indices = np.where(candidate_mask)[0]
+        if len(candidate_indices) == 0:
+            return None
+        return int(candidate_indices[np.argmax(distances[candidate_indices])])
     
     def _m_point_pct_of_initial_suffix(self, m_rest_kg: float) -> str:
         """Скобки: процент массы покоя точки от get_mass_per_point_kg()."""
@@ -308,42 +335,49 @@ class InfoPanel:
         )
 
     def _format_single_photon_mass_line(self, scale_factor: float) -> str:
-        """Масса-эквивалент первого пакета с самой ближней лазерной точки (мин. a_emit у источника)."""
+        """Масса-эквивалент первого пакета с самой дальней лазерной точки (мин. a_emit у источника)."""
         renderer = self.renderer
         try:
             mp = renderer.matter_points
             photon_masses = getattr(mp, '_laser_photon_mass_emit_kg', None)
             photon_a_emit = getattr(mp, '_laser_photon_a_emit', None)
+            photon_r_emit = getattr(mp, '_laser_photon_r_emit_m', None)
             photon_src = getattr(mp, '_laser_photon_source_idx', None)
         except AttributeError:
             photon_masses = None
             photon_a_emit = None
+            photon_r_emit = None
             photon_src = None
 
         picked = False
         if (
             photon_masses is not None
             and photon_a_emit is not None
-            and photon_src is not None
+            and photon_r_emit is not None
             and len(photon_masses) > 0
             and len(photon_a_emit) == len(photon_masses)
-            and len(photon_src) == len(photon_masses)
+            and len(photon_r_emit) == len(photon_masses)
             and scale_factor > 0
         ):
-            near_i = self._nearest_laser_emitter_index(scale_factor)
-            if near_i is not None:
-                src_arr = np.asarray(photon_src, dtype=np.int64)
-                cand = np.where(src_arr == int(near_i))[0]
-                if cand.size > 0:
-                    a_all = np.asarray(photon_a_emit, dtype=np.float64)
-                    m_all = np.asarray(photon_masses, dtype=np.float64)
-                    a_c = a_all[cand]
-                    order = np.lexsort((cand, a_c))
-                    idx = int(cand[int(order[0])])
-                    m_emit = float(m_all[idx])
-                    redshift_factor = float(a_all[idx]) / float(scale_factor)
-                    m_photon = m_emit * redshift_factor
-                    picked = True
+            a_all = np.asarray(photon_a_emit, dtype=np.float64)
+            m_all = np.asarray(photon_masses, dtype=np.float64)
+            r_emit_all = np.asarray(photon_r_emit, dtype=np.float64)
+            
+            # Получаем радиус черной дыры
+            masses = renderer._cached_masses
+            r_bh = masses.get('r_black_hole_schwarzschild_m', 0.0) if masses else 0.0
+            
+            idx = int(np.argmin(a_all))
+            m_emit = float(m_all[idx])
+            a_emit = float(a_all[idx])
+            a_eff = float(scale_factor)
+            r_emit = float(r_emit_all[idx])
+            
+            # Строгий расчет сохраняющейся энергии на бесконечности E_infinity:
+            # m_photon = m_emit * (a_emit / a_eff) * sqrt(f(r_emit))
+            f_emit = max(0.0, 1.0 - r_bh / max(r_emit, 1e-10))
+            m_photon = m_emit * (a_emit / max(a_eff, 1e-300)) * np.sqrt(f_emit)
+            picked = True
 
         if not picked:
             # Лазер выключен или фотоны еще не долетели/уже упали.
@@ -469,14 +503,49 @@ class InfoPanel:
             (f"χ_p + χ_e = {chi_particle_bly:.2f} + {chi_event_bly:.2f} = {chi_sum:.2f}", ui.INFO_TEXT_COLOR),
         ]
         
+        # Диагностика apparent outer (cosmological) horizon в чистом LTB-Λ:
+        # M_eff = M_BH + M_matter_inside + M_laser_inside (полная масса
+        # внутри outer AH, без Birkhoff-вычета). Показываем компоненты,
+        # чтобы видеть, какой вклад двигает горизонт.
+        ds_diag_lines = []
+        if 'M_eff_de_sitter_kg' in masses:
+            M_laser_in_ds = float(masses.get('M_laser_inside_de_sitter_kg', 0.0))
+            M_eff_ds = float(masses.get('M_eff_de_sitter_kg', 0.0))
+            r_ds_class = float(masses.get('r_de_sitter_classical_m', 0.0))
+            r_ds_now = float(masses.get('r_de_sitter_horizon_m', 0.0))
+            shrink_bly = (r_ds_class - r_ds_now) / 9.461e24
+            ds_diag_lines = [
+                (f"  M_laser in dS: {format_mass_kg(M_laser_in_ds)}", ui.HORIZON_DE_SITTER_COLOR),
+                (f"  M_eff (LTB): {format_mass_kg(M_eff_ds)}", ui.HORIZON_DE_SITTER_COLOR),
+                (f"  shrink: {shrink_bly:.3f} bly", ui.HORIZON_DE_SITTER_COLOR),
+            ]
+
+        # Диагностика apparent inner horizon ЦЧД (trapped surface).
+        # Показываем разницу между «классическим» 2GM/c² и фактическим
+        # apparent horizon — это та оболочка, которая поглощается ЦЧД сверх
+        # точечной массы (см. physics/apparent_horizon.py).
+        bh_diag_lines = []
+        if 'r_apparent_inner_horizon_m' in masses:
+            r_ah = float(masses.get('r_apparent_inner_horizon_m', 0.0))
+            r_bh_class = float(masses.get('r_black_hole_classical_m', 0.0))
+            shell_bly = max(r_ah - r_bh_class, 0.0) / 9.461e24
+            r_ah_bly = r_ah / 9.461e24
+            r_bh_class_bly = r_bh_class / 9.461e24
+            bh_diag_lines = [
+                (f"  r_AH (inner): {r_ah_bly:.3e} bly", black_hole_color),
+                (f"  r_BH classical: {r_bh_class_bly:.3e} bly", black_hole_color),
+                (f"  Δr (capture shell): {shell_bly:.3e} bly", black_hole_color),
+            ]
+
         mass_lines = [
             ("MASSES:", ui.INFO_TEXT_COLOR),
             (central_bh_mass_str, black_hole_color),
             (f"  Growth speed: {bh_growth_velocity_formatted}", black_hole_color),
-            (f"Hubble horizon: {format_mass_kg(masses['M_hubble_horizon_kg'])}", ui.HORIZON_HUBBLE_COLOR),
+        ] + bh_diag_lines + [
+            (f"LTB Hubble horizon: {format_mass_kg(masses['M_hubble_horizon_kg'])}", ui.HORIZON_HUBBLE_COLOR),
             (f"Event horizon: {format_mass_kg(masses['M_event_horizon_kg'])}", ui.HORIZON_EVENT_COLOR),
             (f"de Sitter horizon: {format_mass_kg(masses['M_de_sitter_horizon_kg'])}", ui.HORIZON_DE_SITTER_COLOR),
-        ] + particle_horizon_lines + chi_sum_line
+        ] + ds_diag_lines + particle_horizon_lines + chi_sum_line
         
         # Вычисляем позицию для масс внизу экрана
         mass_panel_height = len([l for l, _ in mass_lines if l]) * 20
@@ -506,14 +575,14 @@ class InfoPanel:
             if masses and 'r_particle_horizon_m' in masses:
                 particle_horizon_physical = masses.get('r_particle_horizon_m', 0.0)
                 hubble_r = masses.get('r_hubble_horizon_m', 0.0)
-                de_sitter_r = masses.get('r_de_sitter_horizon_m', 0.0)
                 event_r = masses.get('r_event_horizon_m', 0.0)
             else:
                 # Fallback: вычисляем горизонты (старый путь)
                 particle_horizon_physical = cosmology.particle_horizon(universe.time)
                 hubble_r = float(str(cosmology.hubble_horizon(universe.time, M_black_hole_kg)))
-                de_sitter_r = float(str(cosmology.de_sitter_horizon(M_black_hole_kg)))
                 event_r = float(str(cosmology.cosmological_event_horizon(universe.time, M_black_hole_kg)))
+            # Счётчик «de Sitter» совпадает с пунктиром: пустая Λ, не apparent r_dS(M).
+            de_sitter_r = float(str(cosmology.de_sitter_horizon(0.0)))
             
             # Получаем физические координаты точек и расстояния
             physical_points, distances_from_center, scale_ratio = renderer._get_physical_points_and_distances(

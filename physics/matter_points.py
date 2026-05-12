@@ -1,6 +1,8 @@
 """
 Управление точками материи и их движением при коллапсе
 """
+import time
+
 import numpy as np
 
 import config
@@ -44,9 +46,13 @@ def _scale_factor_lookup(years_arr: np.ndarray) -> np.ndarray:
 
 
 # Кэш предвычисленного конформного времени η(t) = ∫₀^t dt'/a(t').
-# Используется для геометрии фотонов с учётом расширения пространства:
-# фотон, испущенный в t_emit с сопутствующей координатой χ_emit, в момент
-# t_now находится на χ(t_now) = χ_emit − c·[η(t_now) − η(t_emit)].
+# В синхронной комовинг-системе LTB-Λ радиальный нулевой геодезический
+# имеет точный закон χ(t) = χ_emit − c·[η(t) − η(t_emit)]: гравитационный
+# лапс и космологическое расширение учитываются через метрический коэффициент
+# ∂R/∂χ = a(t), который в FRW-области (вдали от плотных оболочек) тождественно
+# равен a(t). Шапиро-замедление у формирующегося apparent horizon учтено
+# автоматически: фотон, пересёкший R_AH, по теореме trapped-surface неизбежно
+# попадает в ЦЧД, и захват выполняется LTB-механизмом capture'а.
 _ETA_CACHE = None
 
 
@@ -193,6 +199,42 @@ class MatterPoints:
         # UI после рендеринга видит уже уменьшенные массы; для отображения/пика нужно
         # значение в момент эмиссии (как P = MATTER_THRUST_POWER_PER_KG_W · m_rest в config).
         self._last_step_nominal_sigma_p_w = 0.0
+        # Последний шаг update_positions: доля на полёт лазерных пакетов vs остальное
+        self._profile_step_photons_s = 0.0
+        self._profile_step_particles_s = 0.0
+
+        # ОПТИМИЗАЦИЯ: кэш «дорогих» LTB-горизонтов (event/hubble) на уровне MatterPoints.
+        # Заполняется в MassCalculator.calculate_masses, читается в
+        # MatterSimulation._ltb_event_horizon / _ltb_hubble_horizon. Так один и тот же
+        # compute_ltb_event_horizon (~150 мс scipy.solve_ivp) не считается 2-3 раза
+        # за кадр для одного и того же состояния материи.
+        self._cached_ltb_event_horizon_m = None
+        self._cached_ltb_hubble_horizon_m = None
+        self._cached_ltb_horizons_key = None
+
+    def ltb_horizons_cache_key(self, time_seconds: float, scale_factor: float):
+        """Ключ кэша LTB-горизонтов: космологическое время + a(t).
+
+        Внутри одного кадра рендерера универсальное `universe.time` константно,
+        и за кадр event/hubble horizon у одной и той же материальной симуляции
+        вызываются 2-3 раза из разных мест (`_emission_boundary_radius` в
+        `update_collapse` + `MassCalculator.calculate_masses`). Все три вызова
+        попадают в один и тот же ключ → второй и третий — O(1).
+
+        Версии состояния (`_comoving_distances_version` и т.д.) в ключ НЕ
+        включены сознательно: между pre-step и post-step состоянием матерьи
+        событие/Hubble меняются на величину порядка `dt / T_int` (с
+        T_int ≈ 100 Гyr вперёд для интегратора события) — это ~10⁻⁴, ниже
+        допуска самого `solve_ivp`. Использовать pre-step значение для
+        post-step state физически приемлемо, а главное — экономит ~150 мс.
+
+        Между кадрами `time_seconds` меняется на dt → ключ строго
+        инвалидируется и пересчёт происходит заново.
+        """
+        return (
+            round(float(time_seconds), 3),
+            round(float(scale_factor), 12),
+        )
 
     def clear_photons(self):
         """Очистить все лазерные фотоны и связанные с ними массивы"""
@@ -299,6 +341,91 @@ class MatterPoints:
             self._points_inside_bh_version += 1
             self._inside_indices_arr = None
 
+    def capture_inside_apparent_horizon(
+        self,
+        r_apparent_horizon_phys: float,
+        scale_factor: float,
+    ) -> float:
+        """
+        Активный захват apparent horizon ЦЧД (модель trapped surface).
+
+        Всё, что физически лежит внутри `r_apparent_horizon_phys`, считается
+        частью ЦЧД и в смысле массы, и в смысле учёта на следующих шагах:
+          • активные точки материи помечаются поглощёнными (inside_bh_mask),
+            их γ·m_rest прибавляется к `accumulated_bh_mass`;
+          • лазерные фотоны в полёте удаляются из массивов, их E/c² (с учётом
+            космологического redshift) прибавляется к `accumulated_bh_mass`
+            и к `laser_absorbed_mass`.
+
+        Args:
+            r_apparent_horizon_phys: физический радиус apparent horizon (м).
+                При <= 0 ничего не делает.
+            scale_factor: a(t_now). При <= 0 ничего не делает.
+
+        Returns:
+            float: прирост массы ЦЧД, кг (точки + фотоны). 0.0, если
+            захватывать нечего.
+        """
+        r_AH = float(r_apparent_horizon_phys)
+        a_now = float(scale_factor)
+        if r_AH <= 0.0 or a_now <= 0.0:
+            return 0.0
+
+        dM_total = 0.0
+
+        # --- Точки материи ---
+        cd = self.comoving_distances
+        masses_rest = self.masses_per_point
+        if (cd is not None
+                and masses_rest is not None
+                and len(cd) > 0
+                and len(masses_rest) == len(cd)):
+            self._ensure_inside_bh_mask()
+            r_phys_pts = cd * a_now
+            inside_mask = (r_phys_pts <= r_AH) & (~self.inside_bh_mask)
+            if inside_mask.any():
+                idx_capture = np.flatnonzero(inside_mask)
+                masses_rest_arr = np.asarray(masses_rest, dtype=np.float64)
+                m_rest_cap = masses_rest_arr[idx_capture]
+
+                v_sq_full = self._v_sq_comoving
+                if (v_sq_full is not None
+                        and len(v_sq_full) == len(masses_rest_arr)):
+                    sf2_over_c2 = (a_now * a_now) / (c * c)
+                    beta2 = v_sq_full[idx_capture] * sf2_over_c2
+                    np.clip(beta2, 0.0, 1.0 - 1e-12, out=beta2)
+                    gamma = 1.0 / np.sqrt(1.0 - beta2)
+                    dM_pts = float(np.sum(gamma * m_rest_cap))
+                else:
+                    dM_pts = float(np.sum(m_rest_cap))
+
+                self.inside_bh_mask |= inside_mask
+                self._points_inside_bh_version += 1
+                self._inside_indices_arr = None
+                self.accumulated_bh_mass += dM_pts
+                dM_total += dM_pts
+
+        # --- Лазерные фотоны в полёте ---
+        if len(self._laser_photon_chi) > 0:
+            r_phys_ph = self._laser_photon_chi * a_now
+            captured_ph = (r_phys_ph <= r_AH) & np.isfinite(r_phys_ph)
+            if captured_ph.any():
+                m_emit_cap = self._laser_photon_mass_emit_kg[captured_ph]
+                a_emit_cap = self._laser_photon_a_emit[captured_ph]
+                photon_mass_now = cosmological_redshifted_photon_mass_kg(
+                    m_emit_cap, a_emit_cap, a_now,
+                )
+                dM_ph = float(np.sum(photon_mass_now))
+                self.accumulated_bh_mass += dM_ph
+                self.laser_absorbed_mass += dM_ph
+                dM_total += dM_ph
+
+                keep = (~captured_ph) & np.isfinite(self._laser_photon_chi) & (self._laser_photon_chi > 0.0)
+                self._apply_laser_photon_keep_mask(keep)
+                self._laser_photons_version += 1
+
+        return float(dM_total)
+
     def _append_laser_photons(
         self,
         chi_emit,
@@ -389,7 +516,29 @@ class MatterPoints:
         universe_time_seconds: float | None,
         r_black_hole: float | None,
     ) -> None:
-        """Сдвиг χ по Δη между последним кадром и текущим t; вперёд — поглощение у ЧД; назад — откат χ."""
+        """
+        Перенос лазерных фотонов как радиальных нулевых геодезик в синхронной
+        системе LTB-Λ:
+
+            χ(t) = χ_emit − c · [η(t) − η(t_emit)],
+
+        где η — конформное время FRW-фона. Это точное GR-выражение для
+        радиального null-геодезика в комовинг-системе пыли: гравитационный
+        лапс ∂R/∂χ автоматически встроен в метрический коэффициент, который
+        в FRW-области тождественно равен a(t). У формирующегося apparent
+        horizon ∂R/∂χ растёт, и фотон в χ-координатах замедляется (Шапиро) —
+        но как только χ_phot·a(t) < R_AH, по теореме trapped-surface фотон
+        обречён, и полноценный LTB-захват выполняет
+        MatterSimulation._capture_inside_apparent_inner_horizon.
+
+        Здесь оставлен только наивный «pre-AH» порог по аргументу r_black_hole
+        (классический Шварцшильд-радиус M_BH) — он нужен ровно для того, чтобы
+        затравочная масса ЦЧД могла начать накапливаться ДО появления apparent
+        horizon: фотон, прошедший через центр (χ ≤ 0), отдаёт свою E/c² в ЦЧД.
+
+        При delta_eta < 0 (откат времени назад) χ откатывается ровно по тому
+        же закону, и «ещё не испущенные» пакеты отфильтровываются.
+        """
         if universe_time_seconds is None or scale_factor <= 0.0:
             return
 
@@ -408,14 +557,16 @@ class MatterPoints:
         t_now_yr = current_time / SECONDS_PER_YEAR
         eta_pair = _conformal_time_lookup(np.array([t_prev_yr, t_now_yr]))
         delta_eta = float(eta_pair[1]) - float(eta_pair[0])
-        self._laser_photon_chi = self._laser_photon_chi - c * delta_eta
 
         if delta_eta > 0.0:
+            self._laser_photon_chi = self._laser_photon_chi - c * delta_eta
+
             r_photon = self._laser_photon_chi * float(scale_factor)
             absorption_radius = max(float(r_black_hole or 0.0), 0.0)
-            absorbed = r_photon <= absorption_radius
-            if absorption_radius <= 0.0:
-                absorbed = r_photon <= 0.0
+            if absorption_radius > 0.0:
+                absorbed = r_photon <= absorption_radius
+            else:
+                absorbed = self._laser_photon_chi <= 0.0
 
             if np.any(absorbed):
                 absorbed_mass = cosmological_redshifted_photon_mass_kg(
@@ -499,7 +650,7 @@ class MatterPoints:
         d = np.sqrt(np.sum(self.points_comoving ** 2, axis=1))
         self.laser_emitter_mask = d < chi_threshold
 
-    def init_laser_emitter_mask(self, n: int) -> None:
+    def init_laser_emitter_mask(self, n: int, *args, **kwargs) -> None:
         """Заполнить маску после инициализации координат (ожидается len(points_comoving) == n)."""
         if self.points_comoving is None or len(self.points_comoving) != n:
             return
@@ -761,11 +912,18 @@ class MatterPoints:
                 расчёта redshift фотонов в полёте до центра.
             r_emission_boundary: Опциональный граничный радиус для остановки эмиссии.
         """
+        t_prof = time.perf_counter()
+        self._profile_step_photons_s = 0.0
+        self._profile_step_particles_s = 0.0
+
         if dt < 0:
             self._last_step_nominal_sigma_p_w = 0.0
+            t_ph = time.perf_counter()
             self._advance_and_absorb_laser_photons(
                 scale_factor, universe_time_seconds, r_black_hole
             )
+            self._profile_step_photons_s = time.perf_counter() - t_ph
+            self._profile_step_particles_s = 0.0
             return
 
         if self.velocities_comoving is None or len(self.velocities_comoving) == 0:
@@ -840,9 +998,11 @@ class MatterPoints:
             else:
                 self._laser_off_r_phys[fresh_idx] = 0.0
 
+        t_ph = time.perf_counter()
         self._advance_and_absorb_laser_photons(
             scale_factor, universe_time_seconds, r_black_hole
         )
+        self._profile_step_photons_s = time.perf_counter() - t_ph
         self._last_step_nominal_sigma_p_w = 0.0
 
         # ОПТИМИЗАЦИЯ: physical_pts и dist считаются ОДИН раз и переиспользуются
@@ -1253,6 +1413,11 @@ class MatterPoints:
         # masses_per_point могли быть «прожжены» лазером в этом шаге — поднимаем
         # версию (дёшево; служит ключом инвалидации внешних кэшей m_eff).
         self._bump_masses_version()
+
+        self._profile_step_particles_s = max(
+            0.0,
+            time.perf_counter() - t_prof - self._profile_step_photons_s,
+        )
 
     def add_points(self, new_points: np.ndarray, scale_factor: float = None, scale_ratio: float = None):
         """

@@ -33,64 +33,100 @@ _MATTER_LASER_PHOTON_COLOR_GAMMA = 0.8
 
 def photon_rgb_blue_green_red(factor_a_emit_over_now: np.ndarray) -> np.ndarray:
     """
-    Цвет по космологическому покраснению: u = a_emit / a_now.
-
-    Два линейных участка в параметре p = u^γ (γ — _MATTER_LASER_PHOTON_COLOR_GAMMA):
-      • p ∈ [½, 1]: зелёный → синий (p=1 свежий фотон);
-      • p ∈ [0, ½]: красный → зелёный (p=0 сильнее ушедшая энергия).
-
-    При γ<1 диапазон u у «свежих» фотонов занимает большую долю пути синий↔зелёный
-    (переход выглядит плавнее), а для малых u половина оттенков красный↔зелёный
-    укладывается в узкий интервал по u — оттенки сильнее меняются от шага к шагу.
-
-    Возвращает (N, 3) с RGB в диапазоне [0, 255].
+    Цвет по полному фактору изменения частоты (красное/синее смещение).
+    u = factor = nu_now / nu_emit.
+    u < 1.0 — красное смещение (зелёный -> красный).
+    u == 1.0 — синий (исходный свежий фотон).
+    u > 1.0 — синее смещение (синий -> белый).
     """
-    u = np.clip(np.asarray(factor_a_emit_over_now, dtype=np.float64), 0.0, 1.0).ravel()
-    gamma = float(_MATTER_LASER_PHOTON_COLOR_GAMMA)
-    p = np.power(u, gamma)
-    n = int(p.size)
+    u = np.maximum(np.asarray(factor_a_emit_over_now, dtype=np.float64), 0.0).ravel()
+    
+    n = int(u.size)
     r = np.zeros(n)
     g = np.zeros(n)
     b = np.zeros(n)
-    half = _PHOTON_LASER_COLOR_P_MIDPOINT
+    
+    mask_red = u <= 1.0
+    mask_blue = ~mask_red
+    
     mx = _PHOTON_LASER_RGB_CHANNEL_MAX
-    hi = p >= half
-    lo = ~hi
-    s_hi = (p[hi] - half) / half
-    g[hi] = mx * (1.0 - s_hi)
-    b[hi] = mx * s_hi
-    s_lo = np.clip(p[lo] / half, 0.0, 1.0)
-    r[lo] = mx * (1.0 - s_lo)
-    g[lo] = mx * s_lo
+    
+    # --- Красное смещение (u <= 1.0) ---
+    if np.any(mask_red):
+        gamma = float(_MATTER_LASER_PHOTON_COLOR_GAMMA)
+        p_red = np.power(u[mask_red], gamma)
+        half = _PHOTON_LASER_COLOR_P_MIDPOINT
+        
+        hi = p_red >= half
+        lo = ~hi
+        
+        r_red = np.zeros(p_red.size)
+        g_red = np.zeros(p_red.size)
+        b_red = np.zeros(p_red.size)
+        
+        s_hi = (p_red[hi] - half) / half
+        g_red[hi] = mx * (1.0 - s_hi)
+        b_red[hi] = mx * s_hi
+        
+        s_lo = np.clip(p_red[lo] / half, 0.0, 1.0)
+        r_red[lo] = mx * (1.0 - s_lo)
+        g_red[lo] = mx * s_lo
+        
+        r[mask_red] = r_red
+        g[mask_red] = g_red
+        b[mask_red] = b_red
+
+    # --- Синее смещение (u > 1.0) ---
+    if np.any(mask_blue):
+        # Плавно переводим из синего (0,0,255) в ослепительно белый (255,255,255)
+        # s_white меняется от 0 (u=1) до 1 (при сильном синем смещении, например u=3)
+        s_white = np.clip((u[mask_blue] - 1.0) / 2.0, 0.0, 1.0)
+        
+        r[mask_blue] = mx * s_white
+        g[mask_blue] = mx * s_white
+        b[mask_blue] = mx  # Синий всегда на максимуме
+        
     return np.stack([r, g, b], axis=1)
 
 
 _PHOTON_DISK_OFFSETS_CACHE: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
 
-def _photon_disk_offsets_int32(radius_px: int) -> tuple[np.ndarray, np.ndarray]:
+def _photon_disk_offsets_int32(size_px: int) -> tuple[np.ndarray, np.ndarray]:
     """
-    Целочисленные смещения для заполненного круга радиуса radius_px (как у pygame.draw.circle).
-
-    Для radius_px == 1 используется отдельная ветка «один пиксель» в отрисовке.
+    Целочисленные смещения для круга (или квадрата) с заданным диаметром/размером.
+    Для size_px == 1 используется отдельная ветка «один пиксель» в отрисовке.
     """
-    r = int(radius_px)
-    if r < 2:
-        raise ValueError("disk offsets require radius_px >= 2")
-    if r not in _PHOTON_DISK_OFFSETS_CACHE:
+    s = int(size_px)
+    if s < 2:
+        raise ValueError("disk offsets require size_px >= 2")
+    if s not in _PHOTON_DISK_OFFSETS_CACHE:
         dx_list: list[int] = []
         dy_list: list[int] = []
+        
+        r = s / 2.0
         r2 = r * r
-        for dx in range(-r, r + 1):
-            for dy in range(-r, r + 1):
-                if dx * dx + dy * dy <= r2:
+        half_s = s // 2
+        
+        for i in range(s):
+            for j in range(s):
+                dx = i - half_s
+                dy = j - half_s
+                
+                # Координаты относительно точного центра (0,0)
+                cx = i - (s - 1) / 2.0
+                cy = j - (s - 1) / 2.0
+                
+                # Для малых размеров рисуем квадрат, для больших скругляем края
+                if s <= 3 or cx * cx + cy * cy <= r2 + 0.25:
                     dx_list.append(dx)
                     dy_list.append(dy)
-        _PHOTON_DISK_OFFSETS_CACHE[r] = (
+                    
+        _PHOTON_DISK_OFFSETS_CACHE[s] = (
             np.asarray(dx_list, dtype=np.int32),
             np.asarray(dy_list, dtype=np.int32),
         )
-    return _PHOTON_DISK_OFFSETS_CACHE[r]
+    return _PHOTON_DISK_OFFSETS_CACHE[s]
 
 
 _MATTER_POINT_SQUARE_OFFSETS_CACHE: dict[int, tuple[np.ndarray, np.ndarray]] = {}
@@ -105,7 +141,7 @@ def _matter_point_square_offsets_int32(px_size: int) -> tuple[np.ndarray, np.nda
     if ps < 2:
         raise ValueError("square offsets require px_size >= 2")
     if ps not in _MATTER_POINT_SQUARE_OFFSETS_CACHE:
-        ox = np.arange(ps, dtype=np.int32)
+        ox = np.arange(ps, dtype=np.int32) - (ps // 2)
         dx, dy = np.meshgrid(ox, ox, indexing="ij")
         _MATTER_POINT_SQUARE_OFFSETS_CACHE[ps] = (dx.ravel(), dy.ravel())
     return _MATTER_POINT_SQUARE_OFFSETS_CACHE[ps]
@@ -277,13 +313,14 @@ class UniverseRenderer:
         self._manual_cosmic_step_this_frame = False
         self._manual_cosmic_dt_signed: float | None = None
         
-        # Симуляция материи (все расчеты и логика вынесены сюда)
-        print("[DEBUG] UniverseRenderer.__init__: creating MatterSimulations...")
+        # Симуляция материи. ОДНА реалистичная LTB-Λ-симуляция (uniform 3D-шар).
+        # «spiral» — это только визуальная раскладка точек, отдельная физика
+        # для неё не считается (это была бы 2D-плоская модель, нефизичная для ОТО).
+        print("[DEBUG] UniverseRenderer.__init__: creating MatterSimulation (uniform 3D)...")
         self.matter_simulations = {
-            "spiral": MatterSimulation(mode="spiral"),
-            "uniform": MatterSimulation(mode="uniform")
+            "uniform": MatterSimulation(mode="uniform"),
         }
-        print("[DEBUG] UniverseRenderer.__init__: MatterSimulations created")
+        print("[DEBUG] UniverseRenderer.__init__: MatterSimulation created")
         
         # Калькулятор масс
         print("[DEBUG] UniverseRenderer.__init__: creating MassCalculator...")
@@ -307,7 +344,16 @@ class UniverseRenderer:
         # активного кадра, потому что состояние симуляции меняется.
         self._cached_masses = None
         self._cached_masses_key = None
-        
+
+        # Кэш углов «спиральной» визуализации.
+        # Угол на спирали фиксируется один раз — по рангу НАЧАЛЬНОГО комовинг-радиуса
+        # каждой точки. На физику это не влияет: радиальная координата на экране
+        # остаётся настоящим 3D-радиусом точки, угол только подменяется при отрисовке.
+        # Сбрасывается при переинициализации точек (по id() массива points_comoving).
+        self._spiral_display_angles_cache = None
+        self._spiral_display_angles_cache_n = -1
+        self._spiral_display_angles_cache_id = None
+
         # Пакетная отрисовка точек/фотонов: SRCALPHA-поверхность размера экрана (переиспользуется)
         self._batch_pixel_overlay: pygame.Surface | None = None
         self._batch_pixel_overlay_wh: tuple[int, int] | None = None
@@ -333,8 +379,7 @@ class UniverseRenderer:
         """Сброс состояния рендерера и симуляции к начальному."""
         self.paused = True
         self.matter_simulations = {
-            "spiral": MatterSimulation(mode="spiral"),
-            "uniform": MatterSimulation(mode="uniform")
+            "uniform": MatterSimulation(mode="uniform"),
         }
         self.mass_calculator = MassCalculator()
         self._cached_physical_points = None
@@ -343,7 +388,53 @@ class UniverseRenderer:
         self._cached_scale_factor = None
         self._cached_scale_ratio = None
         self._cached_distances_squared = None
+        self._spiral_display_angles_cache = None
+        self._spiral_display_angles_cache_n = -1
+        self._spiral_display_angles_cache_id = None
         self.invalidate_mass_cache()
+
+    def _is_spiral_display(self) -> bool:
+        """True, если точки и фотоны нужно показывать в виде спирали.
+
+        Это влияет только на отрисовку: физика всегда честная 4D LTB-Λ для
+        однородного 3D-шара. Угол каждой точки на спирали зафиксирован один
+        раз при инициализации (см. `_get_spiral_display_angles`).
+        """
+        mode = getattr(config, "MATTER_INITIAL_DISTRIBUTION", "uniform")
+        return isinstance(mode, str) and mode.strip().lower() == "spiral"
+
+    def _get_spiral_display_angles(self):
+        """Угол на спирали для каждой точки (длина = N всех частиц) или None.
+
+        Угол фиксируется один раз — по рангу НАЧАЛЬНОГО комовинг-радиуса
+        точки: внутренние точки попадают в начало спирали, внешние — в её
+        хвост (1 полный оборот, как в исходном `generate_points_spiral_in_ball`).
+        Кэш инвалидируется при пересоздании массива точек (по id и длине).
+        """
+        mp = getattr(self.matter_simulation, "matter_points", None)
+        if mp is None:
+            return None
+        pts = mp.points_comoving
+        if pts is None:
+            return None
+        n = int(pts.shape[0])
+        if n == 0:
+            return None
+        if (
+            self._spiral_display_angles_cache is not None
+            and self._spiral_display_angles_cache_n == n
+            and self._spiral_display_angles_cache_id == id(pts)
+        ):
+            return self._spiral_display_angles_cache
+        r0_sq = np.einsum("ij,ij->i", pts, pts)
+        order = np.argsort(r0_sq, kind="stable")
+        rank = np.empty(n, dtype=np.float64)
+        rank[order] = np.arange(n, dtype=np.float64)
+        angles = (2.0 * np.pi) * ((rank + 0.5) / n)
+        self._spiral_display_angles_cache = angles
+        self._spiral_display_angles_cache_n = n
+        self._spiral_display_angles_cache_id = id(pts)
+        return angles
 
     def _black_hole_color_for_mass(self, mass_kg: float) -> tuple:
         """Цвет ЧД: зеленый, когда масса достигла порога Нараи."""
@@ -357,7 +448,7 @@ class UniverseRenderer:
         color = self._black_hole_color_for_mass(mass_kg)
         center = (self.width // 2, self.height // 2)
         size = max(1, int(getattr(config, 'MATTER_POINT_SCREEN_PX', 3)))
-        pygame.draw.rect(self.screen, color, (center[0], center[1], size, size))
+        pygame.draw.rect(self.screen, color, (center[0] - size // 2, center[1] - size // 2, size, size))
 
     def draw_info(self, universe, cosmology, masses, fps: float):
         """Шкала масштаба, горизонты, маркер ЦЧД и основная информационная панель."""
@@ -373,11 +464,11 @@ class UniverseRenderer:
 
     @property
     def matter_simulation(self):
-        import config
-        mode = getattr(config, "MATTER_INITIAL_DISTRIBUTION", "spiral").strip().lower()
-        if mode not in self.matter_simulations:
-            mode = "spiral"
-        return self.matter_simulations[mode]
+        # Физика всегда одна и та же реалистичная uniform 3D-шар (LTB-Λ в ОТО).
+        # Параметр config.MATTER_INITIAL_DISTRIBUTION относится только к
+        # визуальной раскладке точек на экране, отдельная физика для «spiral»
+        # больше не считается (раньше дублировалась впустую каждый кадр).
+        return self.matter_simulations["uniform"]
 
     # ОБРАТНАЯ СОВМЕСТИМОСТЬ: Property-делегаты для доступа к данным из matter_simulation
     # Это позволяет старому коду работать без изменений
@@ -663,7 +754,10 @@ class UniverseRenderer:
         # Вычисляем все горизонты для правильного масштабирования
         # Кэширование уже реализовано внутри методов cosmology
         # ВАЖНО: Проверяем на NaN и Inf, чтобы избежать зависаний
-        # ВАЖНО: Горизонт де Ситтера зависит от массы ЧД (метрика SdS)
+        # Горизонт де Ситтера на экране: только эталон «пустой Λ» (M=0),
+        # см. ui.HORIZON_DE_SITTER_LABEL. Космологический SdS в присутствии ЦЧД
+        # считается отдельно в calculate_masses (r_de_sitter_horizon_m) —
+        # не смешиваем с пунктирной линией.
         # Получаем массу ЧД из переданных масс или вычисляем
         if masses is None:
             masses_temp = self.calculate_masses(universe, cosmology)
@@ -679,15 +773,16 @@ class UniverseRenderer:
             # ОПТИМИЗАЦИЯ: Используем кэшированные радиусы из masses (уже вычислены в calculate_masses)
             if masses and 'r_hubble_horizon_m' in masses:
                 hubble_r = masses.get('r_hubble_horizon_m', 0.0)
-                de_sitter_r = masses.get('r_de_sitter_horizon_m', 0.0)
                 particle_r = masses.get('r_particle_horizon_m', 0.0)
                 event_r = masses.get('r_event_horizon_m', 0.0)
             else:
-                # Fallback: вычисляем горизонты (старый путь, только если masses не переданы)
+                # Fallback без профиля материи: только FLRW c/H. В обычном
+                # кадре MassCalculator передаёт LTB outer apparent horizon.
                 hubble_r = float(str(cosmology.hubble_horizon(universe.time, M_black_hole_kg)))
-                de_sitter_r = float(str(cosmology.de_sitter_horizon(M_black_hole_kg)))
                 particle_r = float(str(cosmology.particle_horizon(universe.time)))
                 event_r = float(str(cosmology.cosmological_event_horizon(universe.time, M_black_hole_kg)))
+            # Пунктир: всегда пустая Λ-Вселенная (не зависит от M_BH и apparent dS).
+            de_sitter_r = float(str(cosmology.de_sitter_horizon(0.0)))
             
             # Проверяем на NaN и Inf
             if not np.isfinite(hubble_r) or hubble_r < 0:
@@ -769,13 +864,21 @@ class UniverseRenderer:
                     # ВАЖНО: Проверяем, виден ли круг на экране перед рисованием
                     if (center_x_int + radius_int >= 0 and center_x_int - radius_int < self.width and
                         center_y_int + radius_int >= 0 and center_y_int - radius_int < self.height):
-                        pygame.draw.circle(
-                        self.screen, 
-                        ui.HORIZON_DE_SITTER_COLOR, 
-                        (center_x_int, center_y_int), 
-                        radius_int, 
-                        width=ui.HORIZON_LINE_WIDTH
-                    )
+                        num_segments = 60
+                        for i in range(0, num_segments, 2):
+                            angle1 = 2 * math.pi * i / num_segments
+                            angle2 = 2 * math.pi * (i + 1) / num_segments
+                            x1 = int(center_x_int + radius_int * math.cos(angle1))
+                            y1 = int(center_y_int + radius_int * math.sin(angle1))
+                            x2 = int(center_x_int + radius_int * math.cos(angle2))
+                            y2 = int(center_y_int + radius_int * math.sin(angle2))
+                            pygame.draw.line(
+                                self.screen,
+                                ui.HORIZON_DE_SITTER_COLOR,
+                                (x1, y1),
+                                (x2, y2),
+                                ui.HORIZON_LINE_WIDTH,
+                            )
                     # Название горизонта - справа от круга
                     label_x = center_x_int + radius_int + 5
                     label_y = center_y_int + ui.HORIZON_DE_SITTER_OFFSET_Y
@@ -864,7 +967,7 @@ class UniverseRenderer:
                         if 0 < label_x < self.width - 100 and 0 < radius_y < self.height:
                             self.screen.blit(radius_label, (label_x, radius_y))
             
-            # Причинный горизонт (белый пунктир) - самый большой
+            # Причинный горизонт (белый сплошной) - самый большой
             # Это полный сопутствующий радиус chi_p(∞) = 63.6 Gly
             causal_r = CAUSAL_HORIZON_COMOVING_METERS * scale_factor
             if causal_r < float('inf') and causal_r > 0:
@@ -872,20 +975,15 @@ class UniverseRenderer:
                 if radius_int > 5:
                     center_x_int = int(float(str(center_x)))
                     center_y_int = int(float(str(center_y)))
-                    # Рисуем пунктирную линию
                     if (center_x_int + radius_int >= 0 and center_x_int - radius_int < self.width and
                         center_y_int + radius_int >= 0 and center_y_int - radius_int < self.height):
-                        # Пунктирная окружность (рисуем сегментами)
-                        num_segments = 60
-                        dash_length = 2 * math.pi * radius_int / (num_segments * 2)
-                        for i in range(0, num_segments, 2):  # Рисуем каждый второй сегмент
-                            angle1 = 2 * math.pi * i / num_segments
-                            angle2 = 2 * math.pi * (i + 1) / num_segments
-                            x1 = int(center_x_int + radius_int * math.cos(angle1))
-                            y1 = int(center_y_int + radius_int * math.sin(angle1))
-                            x2 = int(center_x_int + radius_int * math.cos(angle2))
-                            y2 = int(center_y_int + radius_int * math.sin(angle2))
-                            pygame.draw.line(self.screen, (255, 255, 255), (x1, y1), (x2, y2), ui.HORIZON_LINE_WIDTH)
+                        pygame.draw.circle(
+                            self.screen,
+                            (255, 255, 255),
+                            (center_x_int, center_y_int),
+                            radius_int,
+                            width=ui.HORIZON_LINE_WIDTH,
+                        )
                     
                     # Название горизонта - справа от круга
                     label_x = center_x_int + radius_int + 5
@@ -970,25 +1068,15 @@ class UniverseRenderer:
                 and self._cached_masses_key == cache_key):
             return self._cached_masses
 
-        # Создаем обертки для функций, которые нужны MassCalculator
-        def get_physical_points_wrapper(particle_horizon_physical):
-            return self._get_physical_points_and_distances(universe, cosmology, particle_horizon_physical)
-
         def initialize_matter_points_wrapper():
             self.matter_simulation.initialize_matter_points(universe, cosmology)
 
-        def add_matter_points_wrapper(num_new_points, radius_physical):
-            self.matter_simulation.add_matter_points(universe, cosmology, num_new_points, radius_physical)
-
-        # Вызываем MassCalculator для вычисления масс
         result = self.mass_calculator.calculate_masses(
             universe,
             cosmology,
             matter_points,
             self.paused,
-            get_physical_points_wrapper,
             initialize_matter_points_wrapper,
-            add_matter_points_wrapper,
         )
 
         self._cached_masses = result
@@ -996,7 +1084,7 @@ class UniverseRenderer:
 
         return result
 
-    def step_matter_simulation(self, universe, cosmology):
+    def step_matter_simulation(self, universe, cosmology, r_black_hole_override=None):
         """Один шаг симуляции материи: ленивая инициализация, продвижение
         физики (тяга/гравитация/фотоны) и инвалидация кэша масс на новый кадр.
 
@@ -1018,12 +1106,15 @@ class UniverseRenderer:
         if self.paused and not manual_cosmic:
             return
 
-        r_black_hole = None
-        cached_masses = self._cached_masses
-        if cached_masses:
-            r_black_hole = cached_masses.get('r_black_hole_schwarzschild_m', 0.0)
-            if r_black_hole <= 0:
-                r_black_hole = None
+        if r_black_hole_override is not None:
+            r_black_hole = r_black_hole_override
+        else:
+            r_black_hole = None
+            cached_masses = self._cached_masses
+            if cached_masses:
+                r_black_hole = cached_masses.get('r_black_hole_schwarzschild_m', 0.0)
+                if r_black_hole <= 0:
+                    r_black_hole = None
 
         physics_paused = self.paused and not manual_cosmic
         for sim in self.matter_simulations.values():
@@ -1134,7 +1225,23 @@ class UniverseRenderer:
         # Преобразуем ТОЛЬКО видимые точки в физические координаты
         physical_points = visible_points_comoving * scale_factor
         distances_from_center = visible_comoving_distances * scale_factor
-        
+
+        # === СПИРАЛЬНОЕ ОТОБРАЖЕНИЕ (только визуализация) ===
+        # Физика остаётся 4D LTB-Λ uniform-шара; здесь мы лишь подменяем
+        # 2D-проекцию (x, y) на спиральную раскладку. Радиус r3D точки
+        # сохраняется один-в-один, поэтому горизонты на экране совпадают
+        # с положением точек так же, как и в uniform-режиме.
+        if self._is_spiral_display():
+            angles_all = self._get_spiral_display_angles()
+            if angles_all is not None and visible_indices.size:
+                theta = angles_all[visible_indices]
+                r3d = np.sqrt(np.einsum("ij,ij->i", physical_points, physical_points))
+                spiral_pts = np.empty_like(physical_points)
+                spiral_pts[:, 0] = r3d * np.cos(theta)
+                spiral_pts[:, 1] = r3d * np.sin(theta)
+                spiral_pts[:, 2] = 0.0
+                physical_points = spiral_pts
+
         # Для совместимости с остальным кодом - создаем circle_mask для visible точек
         circle_mask = np.ones(len(physical_points), dtype=bool)
         circle_indices = np.arange(len(physical_points))
@@ -1358,10 +1465,9 @@ class UniverseRenderer:
         M_black_hole_kg = masses.get('M_black_hole_kg', 0.0) if masses else 0.0
         black_hole_color = self._black_hole_color_for_mass(M_black_hole_kg)
         
-        # Получаем радиусы горизонтов для проверки цвета точек
-        # ВАЖНО: Горизонт де Ситтера зависит от массы ЧД (метрика SdS)
-        hubble_horizon_radius = cosmology.hubble_horizon(universe.time)  # в метрах
-        de_sitter_horizon_radius = float(str(cosmology.de_sitter_horizon(M_black_hole_kg)))  # в метрах
+        # Цветовая граница совпадает с пунктиром de Sitter: эталон пустой Λ.
+        # Hubble/outer AH теперь рисуется отдельно из masses['r_hubble_horizon_m'].
+        de_sitter_horizon_radius = float(str(cosmology.de_sitter_horizon(0.0)))
         
         # ОПТИМИЗАЦИЯ: Прямая запись в pixels2d(screen) без SRCALPHA-оверлея и blit.
         # Цвета упаковываются один раз в uint32 под формат поверхности → одна запись
@@ -1465,7 +1571,15 @@ class UniverseRenderer:
         """Отрисовать весь кадр"""
         # ОПТИМИЗАЦИЯ: Профилирование времени выполнения для поиска узких мест
         profile_times = {}
-        
+        self.mass_calculator._last_ltb_horizon_solve_seconds = 0.0
+        self.mass_calculator._last_calculate_masses_points_seconds = 0.0
+        self.mass_calculator._last_calculate_masses_laser_prep_seconds = 0.0
+        for _sim in self.matter_simulations.values():
+            _sim._last_capture_ltb_horizons_seconds = 0.0
+            _mp = _sim.matter_points
+            _mp._profile_step_photons_s = 0.0
+            _mp._profile_step_particles_s = 0.0
+
         # ВАЖНО: Синхронизируем self.width и self.height с актуальным размером экрана
         # Это гарантирует, что координаты всегда вычисляются с правильными значениями
         screen_width, screen_height = self.screen.get_size()
@@ -1483,25 +1597,56 @@ class UniverseRenderer:
         # Сначала продвигаем физику материи, чтобы массы/радиусы соответствовали
         # уже обновлённому состоянию этого кадра.
         t0 = time.perf_counter()
-        self.step_matter_simulation(universe, cosmology)
-        profile_times['step_matter_simulation'] = time.perf_counter() - t0
+        
+        mp = self.matter_simulation.matter_points
+        current_m_bh = getattr(mp, 'accumulated_bh_mass', 0.0)
+        current_r_bh = self.mass_calculator._black_hole_radius_for_mass(current_m_bh)
+        
+        self.step_matter_simulation(universe, cosmology, current_r_bh)
+        step_wall = time.perf_counter() - t0
+        h_cap = sum(
+            getattr(s, '_last_capture_ltb_horizons_seconds', 0.0)
+            for s in self.matter_simulations.values()
+        )
+        step_net = max(0.0, step_wall - h_cap)
+        particles_sum = sum(
+            s.matter_points._profile_step_particles_s
+            for s in self.matter_simulations.values()
+        )
+        photons_sum = sum(
+            s.matter_points._profile_step_photons_s
+            for s in self.matter_simulations.values()
+        )
+        profile_times['step_matter_particles'] = particles_sum
+        profile_times['step_laser_in_flight'] = photons_sum
+        profile_times['step_matter_other'] = max(
+            0.0, step_net - particles_sum - photons_sum
+        )
+        profile_times['ltb_horizons_capture'] = h_cap
 
         # ВАЖНО: Вычисляем массы ОДИН РАЗ за кадр и кэшируем результат
         # Это критично для производительности, так как calculate_masses очень тяжелый
-        t0 = time.perf_counter()
         masses = self.calculate_masses(universe, cosmology)
-        profile_times['calculate_masses'] = time.perf_counter() - t0
-        
-        # Рисуем белые точки плотности материи (всегда видимы)
-        # Передаем кэшированные массы, чтобы избежать повторного вызова calculate_masses
-        t0 = time.perf_counter()
-        self.draw_density_points(universe, cosmology, masses=masses)
-        profile_times['draw_density_points'] = time.perf_counter() - t0
+        ltb_m = self.mass_calculator._last_ltb_horizon_solve_seconds
+        profile_times['masses_points_prep'] = (
+            self.mass_calculator._last_calculate_masses_points_seconds
+        )
+        profile_times['masses_photons_prep'] = (
+            self.mass_calculator._last_calculate_masses_laser_prep_seconds
+        )
+        profile_times['ltb_horizons_masses'] = ltb_m
 
-        # Рисуем фотоны (излучение материя→ЦЧД) с redshift-градиентом
+        # Сначала фотоны (излучение материя→ЦЧД) с redshift-градиентом,
+        # затем точки материи поверх них.
         t0 = time.perf_counter()
         self.draw_photons(universe, cosmology)
         profile_times['draw_photons'] = time.perf_counter() - t0
+
+        # Белые точки плотности материи (всегда видимы).
+        # Передаем кэшированные массы, чтобы избежать повторного вызова calculate_masses.
+        t0 = time.perf_counter()
+        self.draw_density_points(universe, cosmology, masses=masses)
+        profile_times['draw_density_points'] = time.perf_counter() - t0
 
         # Шкала, горизонты, маркер ЦЧД и панель информации — один таймер профилирования.
         t0 = time.perf_counter()
@@ -1532,6 +1677,12 @@ class UniverseRenderer:
             try:
                 print("\n" + "="*60)
                 print("PERFORMANCE PROFILING (time in milliseconds):")
+                print(
+                    "  Шаг: step_matter_particles + step_laser_in_flight + "
+                    "step_matter_other + ltb_horizons_capture = весь step. "
+                    "Массы: masses_points_prep + masses_photons_prep + "
+                    "ltb_horizons_masses = calculate_masses."
+                )
                 print("="*60)
                 # Сортируем по времени выполнения
                 sorted_times = sorted(profile_times.items(), key=lambda x: x[1], reverse=True)
@@ -1544,6 +1695,9 @@ class UniverseRenderer:
                 # Fallback для консолей без поддержки Unicode
                 print("\n" + "="*60)
                 print("PERFORMANCE PROFILING:")
+                print(
+                    "  step_* + masses_* lines partition one full step / calculate_masses call."
+                )
                 print("="*60)
                 sorted_times = sorted(profile_times.items(), key=lambda x: x[1], reverse=True)
                 for method, elapsed in sorted_times:
@@ -1616,7 +1770,7 @@ class UniverseRenderer:
             display_scale_to_px = scale_to_px
         center_x = self.width // 2
         center_y = self.height // 2
-        point_radius = max(1, int(getattr(config, 'MATTER_LASER_PHOTON_RADIUS_PX', 1)))
+        point_size = max(1, int(getattr(config, 'MATTER_LASER_PHOTON_SIZE_PX', 2)))
 
         chi = np.asarray(photon_chi, dtype=np.float64)
         r_photon = chi * float(scale_factor)
@@ -1634,12 +1788,32 @@ class UniverseRenderer:
         ux_attr = getattr(mp, '_laser_photon_ux', None)
         uy_attr = getattr(mp, '_laser_photon_uy', None)
         a_emit_attr = getattr(mp, '_laser_photon_a_emit', None)
-        if ux_attr is None or uy_attr is None or a_emit_attr is None:
+        r_emit_attr = getattr(mp, '_laser_photon_r_emit_m', None)
+        if ux_attr is None or uy_attr is None or a_emit_attr is None or r_emit_attr is None:
             return
         ux_v = np.asarray(ux_attr, dtype=np.float64)[visible]
         uy_v = np.asarray(uy_attr, dtype=np.float64)[visible]
         a_emit_v = np.asarray(a_emit_attr, dtype=np.float64)[visible]
+        r_emit_v = np.asarray(r_emit_attr, dtype=np.float64)[visible]
         r_v = r_photon[visible] * display_scale_to_px
+
+        # === СПИРАЛЬНОЕ ОТОБРАЖЕНИЕ ФОТОНОВ ===
+        # В спиральном режиме фотон должен выглядеть выходящим из того же
+        # «рукава», в котором живёт его точка-источник. Подменяем (ux, uy)
+        # на (cosθ_src, sinθ_src), где θ_src — фиксированный спиральный
+        # угол точки-источника. Радиальная компонента (r_v) — настоящая.
+        if self._is_spiral_display():
+            angles_all = self._get_spiral_display_angles()
+            src_idx_attr = getattr(mp, "_laser_photon_source_idx", None)
+            if angles_all is not None and src_idx_attr is not None:
+                src_v = np.asarray(src_idx_attr, dtype=np.int64)
+                if src_v.shape[0] == photon_chi.shape[0]:
+                    src_v = src_v[visible]
+                    valid = (src_v >= 0) & (src_v < angles_all.shape[0])
+                    if np.any(valid):
+                        theta_src = angles_all[np.where(valid, src_v, 0)]
+                        ux_v = np.where(valid, np.cos(theta_src), ux_v)
+                        uy_v = np.where(valid, np.sin(theta_src), uy_v)
 
         x = ux_v * r_v + center_x
         y = uy_v * r_v + center_y
@@ -1647,14 +1821,24 @@ class UniverseRenderer:
         if not np.any(on_screen):
             return
 
-        factor = np.clip(a_emit_v[on_screen] / float(scale_factor), 0.0, 1.0)
-        colors = np.clip(photon_rgb_blue_green_red(factor), 0, 255).astype(np.uint8)
+        # --- Вычисление полного фактора сдвига частоты (ГЛОБАЛЬНАЯ ЭНЕРГИЯ) ---
+        # По просьбе пользователя цвет должен отражать именно сохраняющуюся массу (E_infinity).
+        # Поэтому мы учитываем только космологическое расширение: a_emit / a_now.
+        # Гравитационное синее смещение (локальный эффект) убрано из визуализации цвета.
+        a_emit_on = a_emit_v[on_screen]
+        a_now = float(scale_factor)
+        
+        z_cosmo_factor = a_emit_on / max(a_now, 1e-300)
+        
+        total_factor = z_cosmo_factor
+
+        colors = np.clip(photon_rgb_blue_green_red(total_factor), 0, 255).astype(np.uint8)
         xi = np.clip(np.floor(x[on_screen]), 0, self.width - 1).astype(np.int32)
         yi = np.clip(np.floor(y[on_screen]), 0, self.height - 1).astype(np.int32)
 
         # ОПТИМИЗАЦИЯ: упаковываем RGB в uint32 под формат screen и пишем
         # напрямую в pixels2d — без SRCALPHA-оверлея, fill и blit.
-        offsets = _photon_disk_offsets_int32(point_radius) if point_radius > 1 else None
+        offsets = _photon_disk_offsets_int32(point_size) if point_size > 1 else None
         try:
             packed = _pack_rgb_for_surface(colors, self.screen)
             pix2d = pygame.surfarray.pixels2d(self.screen)
@@ -1671,10 +1855,11 @@ class UniverseRenderer:
                 try:
                     pos = (int(xi[i]), int(yi[i]))
                     color = (int(colors[i, 0]), int(colors[i, 1]), int(colors[i, 2]))
-                    if point_radius <= 1:
+                    if point_size <= 1:
                         self.screen.set_at(pos, color)
                     else:
-                        pygame.draw.circle(self.screen, color, pos, point_radius)
+                        r = max(1, point_size // 2)
+                        pygame.draw.circle(self.screen, color, pos, r)
                 except (TypeError, ValueError):
                     continue
         return

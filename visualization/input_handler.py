@@ -58,8 +58,6 @@ class InputHandler:
                             toggle_coordinate_display_mode()
                         elif renderer.ui_rects.get("dist") and renderer.ui_rects["dist"].collidepoint(mouse_pos):
                             toggle_matter_distribution_mode()
-                            if hasattr(renderer, "invalidate_mass_cache"):
-                                renderer.invalidate_mass_cache()
                             return "CONTINUE"
             
             elif event.type == pygame.MOUSEWHEEL:
@@ -83,7 +81,6 @@ class InputHandler:
                     dt = -dt_seconds
                     universe.time = max(dt_seconds, universe.time + dt)
                     cosmology.update_scale_factor(dt)
-                    renderer.invalidate_mass_cache()
                     renderer._manual_cosmic_step_this_frame = True
                     renderer._manual_cosmic_dt_signed = dt
                 
@@ -91,7 +88,6 @@ class InputHandler:
                 dt = dt_seconds
                 universe.time += dt
                 cosmology.update_scale_factor(dt)
-                renderer.invalidate_mass_cache()
                 renderer._manual_cosmic_step_this_frame = True
                 renderer._manual_cosmic_dt_signed = dt
         

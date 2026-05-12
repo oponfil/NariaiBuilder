@@ -8,8 +8,17 @@ import time
 import numpy as np
 
 import config
+from physics.apparent_horizon import (
+    build_active_matter_state,
+    compute_ltb_event_horizon,
+    solve_apparent_inner_horizon,
+    solve_apparent_outer_horizon,
+)
 from physics.cosmology import calculate_initial_horizons
 from physics.matter_points import MatterPoints
+from physics.nariai import (
+    cosmological_constant_lambda,
+)
 from utils.config_utils import (
     get_collapse_start_time_seconds,
     get_dt,
@@ -19,10 +28,7 @@ from utils.config_utils import (
 from utils.constants import (
     BILLION_LIGHT_YEARS_IN_METERS,
     CAUSAL_HORIZON_COMOVING_METERS,
-    OMEGA_B,
-    OMEGA_DM,
     PARTICLE_HORIZON_MASS_LIMIT_KG,
-    RHO_CRIT,
     SECONDS_PER_YEAR,
     c,
 )
@@ -42,6 +48,8 @@ class MatterSimulation:
         self.collapse_started = False
         self.last_collapse_time = 0.0
         self._initial_horizon_comoving = 0.0
+        # solve_apparent_* внутри _capture_inside_apparent_inner_horizon за последний кадр
+        self._last_capture_ltb_horizons_seconds = 0.0
     
     def generate_points_in_3d_sphere(self, num_points: int, radius: float, seed: int = None) -> np.ndarray:
         """
@@ -364,7 +372,13 @@ class MatterSimulation:
         self.matter_points._recompute_velocity_norms()
         self.matter_points._bump_masses_version()
         
-        self.matter_points.init_laser_emitter_mask(len(generated_points))
+        r_emission_boundary = self._emission_boundary_radius(universe, cosmology)
+
+        self.matter_points.init_laser_emitter_mask(
+            len(generated_points),
+            r_emission_boundary,
+            cosmology.scale_factor
+        )
         self.matter_points.clear_photons()
         
         self.matter_points_initialized = True
@@ -414,8 +428,10 @@ class MatterSimulation:
                 num_new_points, inner_radius, outer_radius, seed=seed
             )
         
+        r_emission_boundary = self._emission_boundary_radius(universe, cosmology)
+
         scale_ratio = self._calculate_scale_ratio(universe, cosmology, radius_physical)
-        self.matter_points.add_points(new_points, scale_factor, scale_ratio)
+        self.matter_points.add_points(new_points, scale_factor, scale_ratio, r_emission_boundary)
         self.current_num_points = len(self.matter_points.points_comoving)
         self.last_added_radius_comoving = outer_radius
     
@@ -452,6 +468,114 @@ class MatterSimulation:
             scale_ratio = 1.0
         
         return scale_ratio
+
+    def _ltb_hubble_horizon(self, time_seconds: float, cosmology) -> float:
+        """
+        LTB-Λ Hubble radius for this matter simulation state.
+
+        This is the outer apparent horizon:
+            2G·M(<r)/(c²r) + Λr²/3 = 1
+
+        It is the same definition used by MassCalculator for
+        r_hubble_horizon_m. If the state is not ready, fall back to the
+        homogeneous FLRW helper c/H(t).
+        """
+        scale_factor = float(getattr(cosmology, 'scale_factor', 0.0) or 0.0)
+        if scale_factor <= 0.0:
+            return cosmology.hubble_horizon(time_seconds)
+
+        # ОПТИМИЗАЦИЯ: hubble и event LTB-горизонты считаются также в
+        # MassCalculator.calculate_masses; результат там кладётся в
+        # MatterPoints._cached_ltb_*. Если кэш-ключ совпадает — без
+        # повторного solve_apparent_outer_horizon.
+        mp = self.matter_points
+        try:
+            cache_key = mp.ltb_horizons_cache_key(time_seconds, scale_factor)
+            if (
+                mp._cached_ltb_horizons_key == cache_key
+                and mp._cached_ltb_hubble_horizon_m is not None
+                and mp._cached_ltb_hubble_horizon_m > 0.0
+            ):
+                return float(mp._cached_ltb_hubble_horizon_m)
+        except Exception:
+            cache_key = None
+
+        try:
+            matter_state = build_active_matter_state(mp, scale_factor)
+            laser_state = mp.build_in_flight_laser_mass_state(scale_factor)
+            M_bh = float(getattr(mp, 'accumulated_bh_mass', 0.0))
+            lam = cosmological_constant_lambda()
+            r_outer_upper = np.sqrt(3.0 / lam) * 1.001
+            radius = solve_apparent_outer_horizon(
+                M_bh, matter_state, laser_state, scale_factor,
+                0.0, r_outer_upper, lam,
+            )
+            if np.isfinite(radius) and radius > 0.0:
+                if cache_key is not None:
+                    mp._cached_ltb_hubble_horizon_m = float(radius)
+                    mp._cached_ltb_horizons_key = cache_key
+                return float(radius)
+        except Exception as exc:
+            if config.DEBUG:
+                print(f"[MatterSimulation] LTB Hubble fallback to FLRW c/H: {exc}")
+
+        return cosmology.hubble_horizon(time_seconds)
+
+    def _ltb_event_horizon(self, time_seconds: float, cosmology) -> float:
+        """
+        LTB event/null horizon for emitter selection.
+
+        Uses the same null-separatrix helper as MassCalculator, so the
+        "event" laser boundary is not the FLRW/SdS helper and is not forced
+        to equal the local apparent/Hubble boundary.
+        """
+        scale_factor = float(getattr(cosmology, 'scale_factor', 0.0) or 0.0)
+        if scale_factor <= 0.0:
+            return self._ltb_hubble_horizon(time_seconds, cosmology)
+
+        # ОПТИМИЗАЦИЯ: ключевое узкое место — compute_ltb_event_horizon
+        # (~150 мс scipy.solve_ivp). Если в этом кадре MassCalculator уже
+        # посчитал event horizon для того же состояния, переиспользуем его
+        # из MatterPoints._cached_ltb_event_horizon_m.
+        mp = self.matter_points
+        try:
+            cache_key = mp.ltb_horizons_cache_key(time_seconds, scale_factor)
+            if (
+                mp._cached_ltb_horizons_key == cache_key
+                and mp._cached_ltb_event_horizon_m is not None
+                and mp._cached_ltb_event_horizon_m > 0.0
+            ):
+                return float(mp._cached_ltb_event_horizon_m)
+        except Exception:
+            cache_key = None
+
+        try:
+            matter_state = build_active_matter_state(mp, scale_factor)
+            laser_state = mp.build_in_flight_laser_mass_state(scale_factor)
+            M_bh = float(getattr(mp, 'accumulated_bh_mass', 0.0))
+            lam = cosmological_constant_lambda()
+            r_hubble = self._ltb_hubble_horizon(time_seconds, cosmology)
+            radius = compute_ltb_event_horizon(
+                time_seconds, M_bh, matter_state, laser_state,
+                scale_factor, lam, r_hubble,
+            )
+            if np.isfinite(radius) and radius > 0.0:
+                if cache_key is not None:
+                    mp._cached_ltb_event_horizon_m = float(radius)
+                    mp._cached_ltb_horizons_key = cache_key
+                return float(radius)
+        except Exception as exc:
+            if config.DEBUG:
+                print(f"[MatterSimulation] LTB Event fallback to LTB Hubble: {exc}")
+
+        return self._ltb_hubble_horizon(time_seconds, cosmology)
+
+    def _emission_boundary_radius(self, universe, cosmology) -> float:
+        """Физический радиус границы эмиттеров для текущего config.EMISSION_BOUNDARY."""
+        boundary_type = getattr(config, 'EMISSION_BOUNDARY', 'event')
+        if boundary_type == 'hubble':
+            return self._ltb_hubble_horizon(universe.time, cosmology)
+        return self._ltb_event_horizon(universe.time, cosmology)
     
     def update_collapse(self, universe, cosmology, paused: bool = False, r_black_hole: float = None,
                        dt_step_signed: float | None = None):
@@ -476,11 +600,7 @@ class MatterSimulation:
             scale_factor = cosmology.scale_factor
             particle_horizon_physical = cosmology.particle_horizon(universe.time)
             scale_ratio = self._calculate_scale_ratio(universe, cosmology, particle_horizon_physical)
-            boundary_type = getattr(config, 'EMISSION_BOUNDARY', 'event')
-            if boundary_type == 'hubble':
-                r_emission_boundary = cosmology.hubble_horizon(universe.time)
-            else:
-                r_emission_boundary = cosmology.cosmological_event_horizon(universe.time)
+            r_emission_boundary = self._emission_boundary_radius(universe, cosmology)
                 
             self.matter_points.update_positions_and_velocities(
                 dt_step_signed,
@@ -508,20 +628,87 @@ class MatterSimulation:
             if not paused and self.matter_points.points_comoving is not None:
                 dt = dt_step_signed if dt_step_signed is not None else get_dt()
                 
-                boundary_type = getattr(config, 'EMISSION_BOUNDARY', 'event')
-                if boundary_type == 'hubble':
-                    r_emission_boundary = cosmology.hubble_horizon(universe.time)
-                else:
-                    r_emission_boundary = cosmology.cosmological_event_horizon(universe.time)
+                r_emission_boundary = self._emission_boundary_radius(universe, cosmology)
                     
                 self.matter_points.update_positions_and_velocities(
                     dt, scale_factor, scale_ratio, r_black_hole,
                     universe_time_seconds=universe.time,
                     r_emission_boundary=r_emission_boundary,
                 )
+
+                self._capture_inside_apparent_inner_horizon(cosmology, scale_factor)
             
             self.last_collapse_time = universe.time
-    
+
+    # Максимум проходов AH-захвата за один шаг времени. Один проход
+    # достаточен в стационаре; второй ловит случай, когда захват ближайшей
+    # оболочки за этот шаг подрастил M_BH и r_classical настолько, что
+    # соседняя оболочка тоже оказалась внутри нового AH.
+    _AH_CAPTURE_MAX_ITER = 2
+    # Ранний выход: прирост массы за проход мал относительно текущей M_BH.
+    _AH_CAPTURE_REL_DM = 1e-4
+
+    def _capture_inside_apparent_inner_horizon(self, cosmology, scale_factor: float) -> None:
+        """
+        Чистый LTB-Λ захват trapped-зоны вокруг ЦЧД. Всё, что физически лежит
+        внутри inner apparent horizon, переходит в массу ЦЧД.
+
+        Алгоритм inner AH (см. physics/apparent_horizon.solve_apparent_inner_horizon):
+        ищем ПЕРВЫЙ переход trapped → untrapped, идя наружу от r → 0+,
+        для g(r) = 2G·M(<r)/(c²r) + Λr²/3 − 1 = 0 c ПОЛНОЙ M(<r) (без
+        Birkhoff-вычета): M(<r) = M_BH + Σ оболочек + Σ фотонов в полёте.
+
+        Один проход обычно достаточен; до _AH_CAPTURE_MAX_ITER проходов
+        ловят случай, когда захват одной оболочки расширил r_AH и
+        накрыл следующую за один шаг времени.
+        """
+        a_now = float(scale_factor)
+        if a_now <= 0.0:
+            return
+        mp = self.matter_points
+
+        capture_horizons_seconds = 0.0
+        for _ in range(self._AH_CAPTURE_MAX_ITER):
+            M_bh = float(getattr(mp, 'accumulated_bh_mass', 0.0))
+
+            matter_state = build_active_matter_state(mp, a_now)
+            laser_state = mp.build_in_flight_laser_mass_state(a_now)
+
+            lam = cosmological_constant_lambda()
+            r_outer_upper = np.sqrt(3.0 / lam) * 1.001
+            t_h0 = time.perf_counter()
+            r_outer_ltb = solve_apparent_outer_horizon(
+                M_bh, matter_state, laser_state, a_now,
+                0.0, r_outer_upper, lam,
+            )
+
+            # В чистом LTB захват ограничен найденным outer apparent horizon,
+            # а не вакуумным SdS/Nariai радиусом.
+            r_lo = 0.0
+            r_hi = float(r_outer_ltb)
+            if not np.isfinite(r_hi) or r_hi <= 0.0:
+                self._last_capture_ltb_horizons_seconds = capture_horizons_seconds
+                return
+            r_AH = solve_apparent_inner_horizon(
+                M_bh, matter_state, laser_state, a_now,
+                r_lo, r_hi, lam,
+            )
+            capture_horizons_seconds += time.perf_counter() - t_h0
+            if r_AH <= 0.0 or not np.isfinite(r_AH):
+                self._last_capture_ltb_horizons_seconds = capture_horizons_seconds
+                return
+
+            dM = mp.capture_inside_apparent_horizon(r_AH, a_now)
+            if dM <= 0.0:
+                self._last_capture_ltb_horizons_seconds = capture_horizons_seconds
+                return
+            ref = max(M_bh + dM, 1.0)
+            if dM <= self._AH_CAPTURE_REL_DM * ref:
+                self._last_capture_ltb_horizons_seconds = capture_horizons_seconds
+                return
+
+        self._last_capture_ltb_horizons_seconds = capture_horizons_seconds
+
     def get_physical_points(self, cosmology) -> np.ndarray:
         """
         Получить точки в физических координатах.

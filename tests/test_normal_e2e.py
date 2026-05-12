@@ -29,7 +29,7 @@ BILLION_LY = 1e9 * 9.461e15
 
 # Expected values
 EXPECTED_PARTICLE_HORIZON_GLY = 46.5
-EXPECTED_HUBBLE_HORIZON_GLY = 14.4
+EXPECTED_FLRW_HUBBLE_HORIZON_GLY = 14.4
 EXPECTED_H0 = 67.4
 TOLERANCE = 0.25
 
@@ -91,17 +91,19 @@ def run_e2e_test():
     
     # Get results
     r_particle = cosmology.particle_horizon(universe.time)
-    r_hubble = cosmology.hubble_horizon(universe.time, 0)
+    # LambdaCDM.hubble_horizon is the homogeneous FLRW c/H helper.
+    # The scenario LTB Hubble radius is produced by MassCalculator.
+    r_hubble_flrw = cosmology.hubble_horizon(universe.time, 0)
     H0 = cosmology.hubble_parameter(universe.time) * 3.086e19  # to km/s/Mpc
     
     particle_gly = r_particle / BILLION_LY
-    hubble_gly = r_hubble / BILLION_LY
+    hubble_flrw_gly = r_hubble_flrw / BILLION_LY
     
     print("RESULTS:")
     print("-" * 40)
     print(f"  Scale factor: {cosmology.scale_factor:.4f}")
     print(f"  Particle horizon: {particle_gly:.2f} Gly (expected ~{EXPECTED_PARTICLE_HORIZON_GLY})")
-    print(f"  Hubble horizon: {hubble_gly:.2f} Gly (expected ~{EXPECTED_HUBBLE_HORIZON_GLY})")
+    print(f"  FLRW c/H radius: {hubble_flrw_gly:.2f} Gly (expected ~{EXPECTED_FLRW_HUBBLE_HORIZON_GLY})")
     print(f"  H_0: {H0:.1f} km/s/Mpc (expected ~{EXPECTED_H0})")
     print()
     
@@ -114,7 +116,7 @@ def run_e2e_test():
         results.append((name, status, actual, expected, diff * 100))
     
     check("Particle horizon", particle_gly, EXPECTED_PARTICLE_HORIZON_GLY)
-    check("Hubble horizon", hubble_gly, EXPECTED_HUBBLE_HORIZON_GLY)
+    check("FLRW c/H radius", hubble_flrw_gly, EXPECTED_FLRW_HUBBLE_HORIZON_GLY)
     check("Hubble constant", H0, EXPECTED_H0)
     
     print("=" * 70)

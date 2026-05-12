@@ -13,8 +13,16 @@
     python scripts/find_nariai_threshold.py --force
 """
 import argparse
+import logging
 import math
 import os
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 try:
     import _bootstrap  # noqa: F401  -- python scripts/<name>.py
@@ -61,7 +69,7 @@ _EMPTY_FAILED = {"times_billion_years": [], "max_mass_pct_of_nariai": []}
 
 
 def _power_decimals() -> int:
-    """Сколько знаков после запятой нужно для отображения мощности с заданной точностью."""
+    """Сколько знаков после запятой нужно для отображения мощности."""
     return max(1, int(math.ceil(-math.log10(_SEARCH_POWER_TOLERANCE_W))))
 
 
@@ -91,17 +99,16 @@ def find_threshold_for_time(target_time_years: float) -> tuple[float, float]:
     power_cache: dict[float, tuple[bool, float, float]] = {}
 
     def run_sim_cached(power: float, phase_name: str) -> tuple[bool, float, float]:
-        power_rounded = round(power, decimals)
-        if power_rounded in power_cache:
+        if power in power_cache:
             # Не выводим в консоль повторные вычисления, чтобы не засорять лог
-            return power_cache[power_rounded]
+            return power_cache[power]
 
         result = _run_at_power(power, target_time_years)
         triple = (result.success, result.duration_years, result.max_bh_mass_kg)
-        power_cache[power_rounded] = triple
+        power_cache[power] = triple
         verdict = 'SUCCESS' if result.success else 'FAILED'
         pct = result.max_bh_mass_kg / NARIAI_BLACK_HOLE_MASS_KG * 100
-        print(f"  [{phase_name}] Power: {power_rounded:.{decimals}f} W/kg -> {verdict} (Max BH: {pct:.4f}% Nariai)")
+        logger.info(f"  [{phase_name}] Power: {power:.6g} W/kg -> {verdict} (Max BH: {pct:.4f}% Nariai)")
         return triple
 
     # Phase 1A: спускаемся по 3 порядка (делим на 1000) до провала
@@ -148,10 +155,11 @@ def find_threshold_for_time(target_time_years: float) -> tuple[float, float]:
             current_power /= 2.0
 
     # Phase 2: бинарный поиск
-    while power_high - power_low > _SEARCH_POWER_TOLERANCE_W + 1e-9:
-        power_mid = round((power_low + power_high) / 2.0, decimals)
+    # Используем высокую точность float для поиска порога
+    while power_high - power_low > max(_SEARCH_POWER_TOLERANCE_W, power_high * 1e-12):
+        power_mid = (power_low + power_high) / 2.0
         # Защита от бесконечного цикла из-за проблем с точностью float
-        if power_mid == power_low or power_mid == power_high:
+        if power_mid <= power_low or power_mid >= power_high:
             break
 
         success, _, _ = run_sim_cached(power_mid, "Binary Search")
@@ -160,11 +168,6 @@ def find_threshold_for_time(target_time_years: float) -> tuple[float, float]:
         else:
             power_low = power_mid
 
-    # КРИТИЧЕСКИ ВАЖНО: всегда округляем ВВЕРХ, чтобы гарантировать успех.
-    # Обычный round(1.25, 1) в Python округляет к ближайшему чётному (то есть к 1.2),
-    # что приводит к выдаче "провального" порога.
-    factor = 10 ** decimals
-    power_high = math.ceil(power_high * factor) / factor
     return power_high, best_failed_mass
 
 
@@ -189,7 +192,7 @@ def _load_cached_state(cache: JsonCache, force: bool) -> tuple[list, list, list,
     failed_max_mass_pcts = list(failures.get("max_mass_pct_of_nariai", []))
 
     if successful_times or failed_times:
-        print(f"Загружено из кэша: {len(successful_times)} успешных и {len(failed_times)} провальных точек.")
+        logger.info(f"Загружено из кэша: {len(successful_times)} успешных и {len(failed_times)} провальных точек.")
 
     processed = collect_processed_times_billion_years(successful_times, failed_times)
     return successful_times, threshold_powers, failed_times, failed_max_mass_pcts, processed
@@ -209,7 +212,7 @@ def _persist_state(cache: JsonCache,
 
 
 def sweep_time_limits(force: bool = False) -> None:
-    print("=== Nariai Black Hole Threshold vs Laser Start Time (Cosmological Epoch) ===")
+    logger.info("=== Nariai Black Hole Threshold vs Laser Start Time (Cosmological Epoch) ===")
 
     data_dir, json_path = _resolve_data_paths()
     cache = JsonCache(json_path)
@@ -225,26 +228,26 @@ def sweep_time_limits(force: bool = False) -> None:
     for t_years in times_to_test:
         t_b_years = t_years / 1e9
         if is_time_processed(t_b_years, processed):
-            print(f"\n--- Пропускаем: {t_b_years:.2f} млрд лет (уже посчитано) ---")
+            logger.info(f"\n--- Пропускаем: {t_b_years:.2f} млрд лет (уже посчитано) ---")
             continue
 
-        print(f"\n--- Testing Laser Start Time: {t_b_years:.2f} Billion Years ---")
+        logger.info(f"\n--- Testing Laser Start Time: {t_b_years:.2f} Billion Years ---")
         required_power, best_mass = find_threshold_for_time(t_years)
 
         if required_power != float('inf'):
-            print(f"  -> Threshold Power: {required_power:.{decimals}f} W/kg")
+            logger.info(f"  -> Threshold Power: {required_power:.6g} W/kg")
             successful_times.append(t_b_years)
             threshold_powers.append(required_power)
         else:
             pct = 100.0 * best_mass / NARIAI_BLACK_HOLE_MASS_KG
-            print(f"  -> Failed. Max BH mass achieved: {best_mass:.4e} kg ({pct:.4f}% of Nariai)")
+            logger.warning(f"  -> Failed. Max BH mass achieved: {best_mass:.4e} kg ({pct:.4f}% of Nariai)")
             failed_times.append(t_b_years)
             failed_max_mass_pcts.append(pct)
 
         _persist_state(cache, successful_times, threshold_powers, failed_times, failed_max_mass_pcts)
 
-    print("\n=== SWEEP COMPLETED ===")
-    print(f"\nИтоговые данные успешно сохранены в файл {json_path}")
+    logger.info("\n=== SWEEP COMPLETED ===")
+    logger.info(f"\nИтоговые данные успешно сохранены в файл {json_path}")
 
     if successful_times:
         try:
@@ -256,9 +259,9 @@ def sweep_time_limits(force: bool = False) -> None:
                 out_path=os.path.join(data_dir, 'nariai_power_vs_time_sweep.png'),
             )
         except Exception as e:
-            print(f"\nОшибка при построении графика успешных прогонов: {e}")
+            logger.error(f"\nОшибка при построении графика успешных прогонов: {e}")
     else:
-        print("\nNo successful data points found to plot.")
+        logger.info("\nNo successful data points found to plot.")
 
     if failed_times:
         try:
@@ -270,7 +273,7 @@ def sweep_time_limits(force: bool = False) -> None:
                 out_path=os.path.join(data_dir, 'nariai_failed_mass_vs_time.png'),
             )
         except Exception as e:
-            print(f"\nОшибка при построении графика провальных прогонов: {e}")
+            logger.error(f"\nОшибка при построении графика провальных прогонов: {e}")
 
     if successful_times or failed_times:
         show_open_figures()

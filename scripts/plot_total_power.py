@@ -13,10 +13,18 @@
     python scripts/plot_total_power.py --force
 """
 import argparse
+import logging
 import os
 import sys
 
 import numpy as np
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 try:
     import _bootstrap  # noqa: F401  -- python scripts/<name>.py
@@ -88,19 +96,19 @@ def _try_use_total_power_cache(cache: JsonCache, times: np.ndarray) -> np.ndarra
         return None
     if not np.allclose(np.array(cached_times), times):
         return None
-    print(f"Загружены кэшированные данные суммарной мощности ({len(cached_times)} точек).")
+    logger.info(f"Загружены кэшированные данные суммарной мощности ({len(cached_times)} точек).")
     return np.array(cached_total)
 
 
 def _compute_total_powers(times: np.ndarray, specific_powers: np.ndarray) -> np.ndarray:
     shared_cosmology = LambdaCDM()
     total_powers: list[float] = []
-    print("Вычисляем суммарную массу эмиттеров для каждой эпохи...")
+    logger.info("Вычисляем суммарную массу эмиттеров для каждой эпохи...")
     for i, t_b_years in enumerate(times):
         mass_kg = get_emitters_mass(float(t_b_years) * 1e9, shared_cosmology)
         p_total = specific_powers[i] * mass_kg
         total_powers.append(p_total)
-        print(f"Time: {t_b_years:5.2f} Gyr | Emitters Mass: {mass_kg:.2e} kg | "
+        logger.info(f"Time: {t_b_years:5.2f} Gyr | Emitters Mass: {mass_kg:.2e} kg | "
               f"Spec Power: {specific_powers[i]:.2e} W/kg -> Total Power: {p_total:.2e} W")
     return np.array(total_powers)
 
@@ -113,13 +121,13 @@ def main() -> None:
 
     data_dir, json_path = _resolve_data_paths()
     if not os.path.exists(json_path):
-        print(f"Файл {json_path} не найден! Сначала запустите find_nariai_threshold.py")
+        logger.error(f"Файл {json_path} не найден! Сначала запустите find_nariai_threshold.py")
         sys.exit(1)
 
     cache = JsonCache(json_path)
     thresholds = _load_thresholds(cache)
     if thresholds is None:
-        print("В кэше нет успешных точек для построения графика.")
+        logger.error("В кэше нет успешных точек для построения графика.")
         sys.exit(1)
     times, powers_spec = thresholds
 
@@ -132,7 +140,7 @@ def main() -> None:
             "times_billion_years": times.tolist(),
             "total_powers_w": total_powers.tolist(),
         })
-        print("Суммарная мощность успешно кэширована в JSON.")
+        logger.info("Суммарная мощность успешно кэширована в JSON.")
 
     plot_vs_time(
         times, total_powers,
