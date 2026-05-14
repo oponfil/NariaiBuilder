@@ -582,6 +582,9 @@ class MatterSimulation:
     def _emission_boundary_radius(self, universe, cosmology) -> float:
         """Физический радиус границы эмиттеров для текущего config.EMISSION_BOUNDARY.
 
+        Режим ``"all"`` возвращает ``+inf``: вся материя считается внутри границы,
+        тяжёлые LTB-вызовы для отсечки эмиттеров не нужны.
+
         Время выполнения накапливается в `_last_emission_boundary_seconds` —
         отдельная статья профиля. Внутри сидит `compute_ltb_event_horizon`
         (scipy.solve_ivp), на тяжёлых сценариях это десятки мс/кадр.
@@ -589,6 +592,8 @@ class MatterSimulation:
         t0 = time.perf_counter()
         try:
             boundary_type = str(getattr(config, 'EMISSION_BOUNDARY', 'event')).strip().lower()
+            if boundary_type == 'all':
+                return float('inf')
             if boundary_type == 'hubble':
                 return self._ltb_hubble_horizon(universe.time, cosmology)
             if boundary_type == 'desitter':

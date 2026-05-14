@@ -3,7 +3,13 @@ import numpy as np
 import config
 from physics import matter_points as matter_points_mod
 from physics.cosmology import LambdaCDM
-from physics.matter_points import MatterPoints
+from physics.laser import cosmological_redshifted_photon_mass_kg
+from physics.matter_points import MatterPoints, _bh_influence_radius_vs_lambda
+from physics.nariai import (
+    cosmological_constant_lambda,
+    nariai_mass_vacuum,
+    nariai_radius,
+)
 from utils.config_utils import get_collapse_start_time_seconds
 from utils.constants import G, c
 from utils.cosmology_utils import calculate_scale_factor_at_time
@@ -249,6 +255,127 @@ def test_laser_high_power_burns_exponentially_within_one_dt():
     finally:
         config.MATTER_THRUST_POWER_PER_KG_W = original_spec
         config.MATTER_LASER_REMAINING_FRACTION = original_eff
+
+
+def test_sds_freeze_preserves_more_energy_than_flrw_near_nariai():
+    """
+    Вблизи Nariai-предела фотон входит в сферу SdS-доминирования ЦЧД
+    r_*³ = 3·r_S/Λ задолго до достижения inner apparent horizon. Внутри
+    r_* локальная метрика — статический SdS, и Killing-энергия E_∞ —
+    инвариант радиальной нулевой геодезики; FRW-redshift, продолженный
+    дальше «по a(t)», физически некорректен.
+
+    Тест проверяет: после того, как фотон зашёл внутрь r_*, при дальнейшем
+    росте a(t) поглощённая ЦЧД масса считается через a_freeze (момент
+    пересечения r_*), а не через a(t_absorb). Поэтому доставленная масса
+    БОЛЬШЕ, чем дала бы чистая FLRW-формула m_emit·a_emit/a(t_absorb).
+    """
+    mp = MatterPoints()
+    M_bh = 5.0e52
+    mp.accumulated_bh_mass = M_bh
+
+    r_freeze = _bh_influence_radius_vs_lambda(M_bh)
+    assert r_freeze > 0.0, "r_freeze должен быть положителен при M_BH > 0"
+
+    a_emit = 0.5
+    a_freeze_target = 0.7
+    a_now = 1.0
+    mass_emit = 1.0
+
+    chi_inside = 0.5 * r_freeze / a_freeze_target
+    mp._laser_photon_chi = np.array([chi_inside], dtype=np.float64)
+    mp._laser_photon_mass_emit_kg = np.array([mass_emit], dtype=np.float64)
+    mp._laser_photon_a_emit = np.array([a_emit], dtype=np.float64)
+    mp._laser_photon_r_emit_m = np.array([1.0e20], dtype=np.float64)
+    mp._laser_photon_ux = np.array([1.0], dtype=np.float64)
+    mp._laser_photon_uy = np.array([0.0], dtype=np.float64)
+    mp._laser_photon_source_idx = np.array([0], dtype=np.int64)
+    mp._laser_photon_emit_t_seconds = np.array([0.0], dtype=np.float64)
+    mp._laser_photon_a_freeze = np.array([np.nan], dtype=np.float64)
+
+    mp._freeze_redshift_inside_bh_influence(r_freeze, a_freeze_target)
+    assert mp._laser_photon_a_freeze[0] == a_freeze_target, (
+        "После пересечения r_freeze a_freeze должен быть зафиксирован"
+    )
+
+    a_eff = mp._effective_redshift_a_now(a_now)
+    np.testing.assert_allclose(a_eff[0], a_freeze_target, rtol=0, atol=0)
+
+    delivered_with_freeze = cosmological_redshifted_photon_mass_kg(
+        mass_emit, a_emit, float(a_eff[0])
+    )
+    delivered_flrw_only = cosmological_redshifted_photon_mass_kg(
+        mass_emit, a_emit, a_now
+    )
+    assert delivered_with_freeze > delivered_flrw_only, (
+        f"SdS-freeze должен доставлять БОЛЬШЕ массы, чем чистый FLRW: "
+        f"freeze={delivered_with_freeze:.6e}, flrw={delivered_flrw_only:.6e}"
+    )
+    np.testing.assert_allclose(
+        delivered_with_freeze, mass_emit * a_emit / a_freeze_target, rtol=1e-12
+    )
+
+
+def test_sds_freeze_inactive_outside_bh_influence_sphere():
+    """
+    Если фотон ещё не пересёк r_*, a_freeze остаётся NaN и используется
+    обычный FLRW-redshift m_emit·a_emit/a(t_now). Это гарантирует, что
+    далеко от ЦЧД симуляция продолжает воспроизводить стандартный
+    космологический результат.
+    """
+    mp = MatterPoints()
+    M_bh = 1.0e50
+    mp.accumulated_bh_mass = M_bh
+    r_freeze = _bh_influence_radius_vs_lambda(M_bh)
+
+    a_now = 1.0
+    a_emit = 0.4
+    mass_emit = 2.0
+
+    chi_far = 100.0 * r_freeze / a_now
+    mp._laser_photon_chi = np.array([chi_far], dtype=np.float64)
+    mp._laser_photon_mass_emit_kg = np.array([mass_emit], dtype=np.float64)
+    mp._laser_photon_a_emit = np.array([a_emit], dtype=np.float64)
+    mp._laser_photon_r_emit_m = np.array([1.0e22], dtype=np.float64)
+    mp._laser_photon_ux = np.array([1.0], dtype=np.float64)
+    mp._laser_photon_uy = np.array([0.0], dtype=np.float64)
+    mp._laser_photon_source_idx = np.array([0], dtype=np.int64)
+    mp._laser_photon_emit_t_seconds = np.array([0.0], dtype=np.float64)
+    mp._laser_photon_a_freeze = np.array([np.nan], dtype=np.float64)
+
+    mp._freeze_redshift_inside_bh_influence(r_freeze, a_now)
+    assert np.isnan(mp._laser_photon_a_freeze[0]), (
+        "Фотон снаружи r_freeze не должен получать a_freeze"
+    )
+
+    a_eff = mp._effective_redshift_a_now(a_now)
+    delivered = cosmological_redshifted_photon_mass_kg(
+        mass_emit, a_emit, float(a_eff[0])
+    )
+    np.testing.assert_allclose(delivered, mass_emit * a_emit / a_now, rtol=1e-12)
+
+
+def test_bh_influence_radius_matches_nariai_boundary():
+    """
+    Аналитическая проверка r_*³ = 3·r_S/Λ.
+
+      • При M_BH = 0 → r_* = 0 (нет SdS-зоны).
+      • При M_BH = M_N → r_* = 2^(1/3)·r_N ≈ 1.26·r_N.
+
+    Это фиксирует физический смысл: r_* — характеристический радиус, на
+    котором Шварцшильд-член и Λ-член в f(r) = 1 − r_S/r − Λr²/3 сравниваются.
+    """
+    assert _bh_influence_radius_vs_lambda(0.0) == 0.0
+    assert _bh_influence_radius_vs_lambda(-1.0) == 0.0
+
+    M_N = nariai_mass_vacuum()
+    r_N = nariai_radius()
+    lam = cosmological_constant_lambda()
+    r_s_N = 2.0 * G * M_N / (c * c)
+    expected = (3.0 * r_s_N / lam) ** (1.0 / 3.0)
+    actual = _bh_influence_radius_vs_lambda(M_N)
+    np.testing.assert_allclose(actual, expected, rtol=1e-12)
+    np.testing.assert_allclose(actual / r_N, 2.0 ** (1.0 / 3.0), rtol=1e-12)
 
 
 def _setup_one_emitter_with_bh(thrust_w_per_kg, r_phys, m_bh_kg, m_rest=1.0):

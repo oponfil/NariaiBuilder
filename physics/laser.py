@@ -99,10 +99,15 @@ def emitted_photon_mass_coord_kg(emitted_rest_mass_kg, gamma, beta_radial, sqrt_
     return np.maximum(mass_emit, 0.0)
 
 
-def cosmological_redshifted_photon_mass_kg(mass_emit_kg, scale_factor_emit, scale_factor_now: float):
-    """Масса-эквивалент фотона после космологического redshift: m_emit * a_emit / a_now."""
+def cosmological_redshifted_photon_mass_kg(mass_emit_kg, scale_factor_emit, scale_factor_now):
+    """Масса-эквивалент фотона после космологического redshift: m_emit * a_emit / a_now.
+
+    Все три аргумента могут быть как скалярами, так и массивами одинаковой
+    формы — поддерживается per-photon вектор a_now (нужен для SdS-freeze,
+    когда у части пакетов a_now замораживается в a_freeze < a(t)).
+    """
     return (
         np.asarray(mass_emit_kg, dtype=np.float64)
         * np.asarray(scale_factor_emit, dtype=np.float64)
-        / float(scale_factor_now)
+        / np.asarray(scale_factor_now, dtype=np.float64)
     )

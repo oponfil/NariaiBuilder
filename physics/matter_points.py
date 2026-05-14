@@ -28,6 +28,40 @@ from utils.constants import (
 
 
 
+def _cosmological_constant_lambda() -> float:
+    """Λ = 3·H0²·Ω_Λ / c²  (1/м²). Дублирует physics.nariai.cosmological_constant_lambda
+    локально, чтобы не вводить cyclic import при инициализации модуля.
+    """
+    return 3.0 * (H0_s ** 2) * OMEGA_LAMBDA / (c * c)
+
+
+def _bh_influence_radius_vs_lambda(M_bh_kg: float) -> float:
+    """
+    «Сфера влияния ЦЧД против космологической постоянной».
+
+        r_*³ = 3·r_S / Λ = 6·G·M_BH / (c²·Λ)
+
+    Радиус, на котором в f(r) = 1 − r_S/r − Λr²/3 шварцшильдов член и Λ-член
+    становятся равными. Эквивалентно: радиус сферы, внутри которой средняя
+    плотность ЦЧД сравнивается с эффективной «плотностью» Λ. Внутри r_* ЦЧД
+    доминирует над Λ-фоном, метрика локально SdS-подобна, и Killing-энергия
+    E_∞ сохраняется вдоль радиальной нулевой геодезики — то есть FRW-redshift
+    как описание перестаёт быть верным.
+
+    При M_BH = 0 возвращает 0. В лимите Nariai (M_BH = M_N = c²/(3G√Λ)) даёт
+    r_* = 2^(1/3)/√Λ ≈ 1.26·r_N — чуть снаружи слившихся горизонтов, что
+    соответствует тому, что SdS-структура захватывает почти весь объём.
+    """
+    M = float(M_bh_kg)
+    if M <= 0.0:
+        return 0.0
+    lam = _cosmological_constant_lambda()
+    if lam <= 0.0:
+        return 0.0
+    r_s = 2.0 * G * M / (c * c)
+    return float((3.0 * r_s / lam) ** (1.0 / 3.0))
+
+
 def _scale_factor_lookup(years_arr: np.ndarray) -> np.ndarray:
     """
     Векторное a(t) для плоской ΛCDM (аналитическое решение Фридмана).
@@ -46,13 +80,18 @@ def _scale_factor_lookup(years_arr: np.ndarray) -> np.ndarray:
 
 
 # Кэш предвычисленного конформного времени η(t) = ∫₀^t dt'/a(t').
-# В синхронной комовинг-системе LTB-Λ радиальный нулевой геодезический
-# имеет точный закон χ(t) = χ_emit − c·[η(t) − η(t_emit)]: гравитационный
-# лапс и космологическое расширение учитываются через метрический коэффициент
-# ∂R/∂χ = a(t), который в FRW-области (вдали от плотных оболочек) тождественно
-# равен a(t). Шапиро-замедление у формирующегося apparent horizon учтено
-# автоматически: фотон, пересёкший R_AH, по теореме trapped-surface неизбежно
-# попадает в ЦЧД, и захват выполняется LTB-механизмом capture'а.
+# Радиальная нулевая геодезика на FRW-фоне ΛCDM:
+#     χ(t) = χ_emit − c · [η(t) − η(t_emit)].
+# Это leading-order описание в гибридной модели «FRW-фон + точечная
+# центральная масса» (McVittie-подобный предел). Cosmological redshift
+# m_emit·a_emit/a(t) применяется по этой геодезике ровно до тех пор, пока
+# фотон не входит в сферу SdS-доминирования ЦЧД r_*³ = 3·r_S/Λ (см.
+# `_bh_influence_radius_vs_lambda`). Внутри r_* локальная метрика статична
+# (SdS), E_∞ — точный инвариант, и cosmological factor «замораживается» —
+# в _advance_and_absorb_laser_photons это реализовано через _laser_photon_a_freeze.
+# Это важно вблизи Nariai-предела, где r_* ~ r_N и фотон проводит много
+# времени в SdS-зоне между r_* и r_AH — без freeze'а масса, доставленная
+# в ЦЧД, была бы занижена.
 _ETA_CACHE = None
 
 
@@ -193,6 +232,21 @@ class MatterPoints:
         self._laser_photon_source_idx = np.empty(0, dtype=np.int64)
         # Космологическое время испускания пакета (с) — для отмотки назад (удаление «ещё не испущенных»).
         self._laser_photon_emit_t_seconds = np.empty(0, dtype=np.float64)
+        # SdS-freeze a(t) для пакета: масштабный фактор в момент, когда фотон
+        # ВПЕРВЫЕ ушёл внутрь inner apparent horizon ЦЧД (trapped-зона). После
+        # этого момента в локальной SdS-метрике сохраняется E_∞ — никакого
+        # дополнительного FRW-redshift не накапливается, и в формуле поглощения
+        # вместо a(t_now) используется этот «замороженный» a_freeze.
+        # NaN — фотон ещё не пересекал inner AH; работает обычный FRW-redshift
+        # m_emit·a_emit/a(t_now).
+        # Физически: пока фотон в untrapped области, McVittie/гибрид
+        # FRW+Schwarzschild даёт стандартный космологический redshift; как
+        # только он попадает в trapped-зону, метрика локально SdS (статика),
+        # и Killing-энергия E_∞ — инвариант геодезики, не масштабируется
+        # a(t). Это особенно важно вблизи Nariai, где r_AH_inner велик и
+        # фотон проводит ощутимое время в trapped-зоне между пересечением
+        # горизонта и достижением классического r_S = 2GM_BH/c².
+        self._laser_photon_a_freeze = np.empty(0, dtype=np.float64)
         self._laser_photon_last_time_seconds = None
         # True — точка участвует в лазерной тяге (внутри cosmological event horizon
         # в момент t_collapse; см. _emitter_comoving_radius_m /
@@ -249,8 +303,9 @@ class MatterPoints:
         self._laser_photon_uy = np.empty(0, dtype=np.float64)
         self._laser_photon_source_idx = np.empty(0, dtype=np.int64)
         self._laser_photon_emit_t_seconds = np.empty(0, dtype=np.float64)
+        self._laser_photon_a_freeze = np.empty(0, dtype=np.float64)
         self._laser_photon_last_time_seconds = None
-        
+
         # Также сбрасываем параметры лазера для точек
         if self.points_comoving is not None:
             n = len(self.points_comoving)
@@ -422,20 +477,33 @@ class MatterPoints:
 
         # --- Лазерные фотоны в полёте ---
         if len(self._laser_photon_chi) > 0:
+            self._sync_a_freeze_length()
             r_phys_ph = self._laser_photon_chi * a_now
-            captured_ph = (r_phys_ph <= r_AH) & np.isfinite(r_phys_ph)
-            if captured_ph.any():
-                m_emit_cap = self._laser_photon_mass_emit_kg[captured_ph]
-                a_emit_cap = self._laser_photon_a_emit[captured_ph]
+            inside_ah = (r_phys_ph <= r_AH) & np.isfinite(r_phys_ph)
+            if inside_ah.any():
+                # Сначала зафиксируем a_freeze для тех, кто только что вошёл
+                # в trapped-зону (≤ r_AH), но ещё не имел a_freeze. Inner AH
+                # — это уже надёжно SdS-доминированная область, поэтому
+                # E_∞ далее сохраняется.
+                fresh_freeze = inside_ah & np.isnan(self._laser_photon_a_freeze)
+                if np.any(fresh_freeze):
+                    self._laser_photon_a_freeze[fresh_freeze] = a_now
+
+                # Поглощение: используем эффективный a (a_freeze, если задан,
+                # иначе текущий a_now). Это и есть «no further FRW redshift
+                # после входа в SdS-зону».
+                m_emit_cap = self._laser_photon_mass_emit_kg[inside_ah]
+                a_emit_cap = self._laser_photon_a_emit[inside_ah]
+                a_eff_cap = self._effective_redshift_a_now(a_now, inside_ah)
                 photon_mass_now = cosmological_redshifted_photon_mass_kg(
-                    m_emit_cap, a_emit_cap, a_now,
+                    m_emit_cap, a_emit_cap, a_eff_cap,
                 )
                 dM_ph = float(np.sum(photon_mass_now))
                 self.accumulated_bh_mass += dM_ph
                 self.laser_absorbed_mass += dM_ph
                 dM_total += dM_ph
 
-                keep = (~captured_ph) & np.isfinite(self._laser_photon_chi) & (self._laser_photon_chi > 0.0)
+                keep = (~inside_ah) & np.isfinite(self._laser_photon_chi) & (self._laser_photon_chi > 0.0)
                 self._apply_laser_photon_keep_mask(keep)
                 self._laser_photons_version += 1
 
@@ -492,6 +560,11 @@ class MatterPoints:
             self._laser_photon_emit_t_seconds,
             np.full(int(np.sum(valid)), float(emit_time_seconds), dtype=np.float64),
         ])
+        # Новые пакеты ещё не пересекали inner AH → freeze не активен (NaN).
+        self._laser_photon_a_freeze = np.concatenate([
+            self._laser_photon_a_freeze,
+            np.full(int(np.sum(valid)), np.nan, dtype=np.float64),
+        ])
         self._laser_photons_version += 1
 
     def _sync_laser_photon_emit_times_length(self) -> None:
@@ -515,7 +588,13 @@ class MatterPoints:
             self._laser_photon_emit_t_seconds = self._laser_photon_emit_t_seconds[:n]
 
     def _apply_laser_photon_keep_mask(self, keep: np.ndarray) -> None:
-        """Отфильтровать все массивы лазерных фотонов одной маской keep."""
+        """Отфильтровать все массивы лазерных фотонов одной маской keep.
+
+        ВАЖНО: keep строится по «старой» длине self._laser_photon_chi
+        (т.е. до фильтрации), поэтому _sync_a_freeze_length() здесь
+        приводит a_freeze к этой же длине ДО индексации.
+        """
+        self._sync_a_freeze_length()
         self._laser_photon_chi = self._laser_photon_chi[keep]
         self._laser_photon_mass_emit_kg = self._laser_photon_mass_emit_kg[keep]
         self._laser_photon_a_emit = self._laser_photon_a_emit[keep]
@@ -524,6 +603,68 @@ class MatterPoints:
         self._laser_photon_uy = self._laser_photon_uy[keep]
         self._laser_photon_source_idx = self._laser_photon_source_idx[keep]
         self._laser_photon_emit_t_seconds = self._laser_photon_emit_t_seconds[keep]
+        self._laser_photon_a_freeze = self._laser_photon_a_freeze[keep]
+
+    def _effective_redshift_a_now(self, a_now: float, mask: np.ndarray | None = None) -> np.ndarray:
+        """
+        Эффективный «текущий» масштабный фактор для FRW-redshift каждого пакета:
+        a_freeze, если фотон уже пересёк сферу влияния ЦЧД (SdS-зона), иначе a_now.
+
+        Возвращает массив той же длины, что и self._laser_photon_chi (или сжатый
+        по `mask`, если mask задан).
+        """
+        self._sync_a_freeze_length()
+        a_arr = self._laser_photon_a_freeze
+        n = int(a_arr.shape[0])
+        if n == 0:
+            return np.empty(0, dtype=np.float64)
+        a_eff = np.where(np.isnan(a_arr), float(a_now), a_arr)
+        if mask is None:
+            return a_eff
+        return a_eff[mask]
+
+    def _freeze_redshift_inside_bh_influence(
+        self,
+        r_freeze_phys: float,
+        scale_factor: float,
+    ) -> None:
+        """
+        Зафиксировать a(t_freeze) для пакетов, чьё физическое расстояние
+        χ·a(t_now) впервые ушло внутрь радиуса r_freeze_phys (сфера SdS-
+        доминирования ЦЧД, см. `_bh_influence_radius_vs_lambda`).
+
+        Идемпотентно: пакеты, у которых a_freeze уже задан, не меняются. Это
+        и есть физический «лок» E_∞ в момент входа в SdS-зону.
+        """
+        if r_freeze_phys <= 0.0 or scale_factor <= 0.0:
+            return
+        if len(self._laser_photon_chi) == 0:
+            return
+        self._sync_a_freeze_length()
+        r_phys = self._laser_photon_chi * float(scale_factor)
+        inside_now = np.isfinite(r_phys) & (r_phys <= float(r_freeze_phys))
+        needs_freeze = inside_now & np.isnan(self._laser_photon_a_freeze)
+        if np.any(needs_freeze):
+            self._laser_photon_a_freeze[needs_freeze] = float(scale_factor)
+            self._laser_photons_version += 1
+
+    def _sync_a_freeze_length(self) -> np.ndarray:
+        """Гарантировать, что _laser_photon_a_freeze имеет длину n_photons.
+
+        Расширяет NaN'ами для пакетов, у которых поле отсутствовало (например,
+        после загрузки сохранения старого формата). Возвращает приведённый
+        массив длины n_photons (in-place обновляя поле).
+        """
+        n = int(self._laser_photon_chi.shape[0])
+        arr = getattr(self, '_laser_photon_a_freeze', None)
+        if arr is None:
+            arr = np.full(n, np.nan, dtype=np.float64)
+        elif arr.shape[0] < n:
+            arr = np.concatenate([arr, np.full(n - arr.shape[0], np.nan, dtype=np.float64)])
+        elif arr.shape[0] > n:
+            arr = arr[:n]
+        self._laser_photon_a_freeze = arr
+        return arr
 
     def _advance_and_absorb_laser_photons(
         self,
@@ -532,24 +673,31 @@ class MatterPoints:
         r_black_hole: float | None,
     ) -> None:
         """
-        Перенос лазерных фотонов как радиальных нулевых геодезик в синхронной
-        системе LTB-Λ:
+        Перенос лазерных фотонов как радиальных нулевых геодезик ΛCDM-фона:
 
-            χ(t) = χ_emit − c · [η(t) − η(t_emit)],
+            χ(t) = χ_emit − c · [η(t) − η(t_emit)],   η = ∫dt'/a(t').
 
-        где η — конформное время FRW-фона. Это точное GR-выражение для
-        радиального null-геодезика в комовинг-системе пыли: гравитационный
-        лапс ∂R/∂χ автоматически встроен в метрический коэффициент, который
-        в FRW-области тождественно равен a(t). У формирующегося apparent
-        horizon ∂R/∂χ растёт, и фотон в χ-координатах замедляется (Шапиро) —
-        но как только χ_phot·a(t) < R_AH, по теореме trapped-surface фотон
-        обречён, и полноценный LTB-захват выполняет
-        MatterSimulation._capture_inside_apparent_inner_horizon.
+        Это leading-order решение в гибридной модели «FRW-фон + центральная
+        точечная масса (McVittie-подобный предел)». В чистом FRW-пределе
+        формула даёт стандартный космологический redshift 1+z = a(t_now)/a(t_emit).
 
-        Здесь оставлен только наивный «pre-AH» порог по аргументу r_black_hole
-        (классический Шварцшильд-радиус M_BH) — он нужен ровно для того, чтобы
-        затравочная масса ЦЧД могла начать накапливаться ДО появления apparent
-        horizon: фотон, прошедший через центр (χ ≤ 0), отдаёт свою E/c² в ЦЧД.
+        НО гибридная модель работает не везде. Когда фотон попадает в область,
+        где ЦЧД доминирует над Λ-фоном — она же сфера SdS-доминирования
+        r_*³ = 3·r_S/Λ (см. `_bh_influence_radius_vs_lambda`) — локальная
+        метрика становится статическим SdS-куском. В нём Killing-энергия
+        E_∞ — точный инвариант радиальной нулевой геодезики и не масштабируется
+        с a(t). Поэтому для физически правильной доставки энергии в ЦЧД
+        фиксируется a_freeze = a(t) в момент пересечения r_*. После этого
+        FRW-redshift «замораживается»: масса, поглощённая ЦЧД, считается
+        как m_emit·a_emit/a_freeze, а не m_emit·a_emit/a(t_absorb). Это
+        важно вблизи Nariai-предела, где r_* приближается к r_N и поглощение
+        в a(t_now) занижало бы массу.
+
+        Поглощение по-прежнему происходит на r_black_hole (передаётся снаружи;
+        это inner apparent horizon с учётом материи и фотонов внутри — см.
+        `physics.mass_calculator.r_black_hole_schwarzschild_m`). Trapped-зона
+        внутри inner AH — тоже SdS, поэтому туда тоже распространяется
+        правило a_freeze (страховка на случай, если r_AH > r_*).
 
         При delta_eta < 0 (откат времени назад) χ откатывается ровно по тому
         же закону, и «ещё не испущенные» пакеты отфильтровываются.
@@ -578,16 +726,33 @@ class MatterPoints:
 
             r_photon = self._laser_photon_chi * float(scale_factor)
             absorption_radius = max(float(r_black_hole or 0.0), 0.0)
+
+            # SdS-сфера влияния ЦЧД против Λ — физический freeze-radius для
+            # cosmological redshift. Берём max с r_AH на случай, если плотная
+            # материя растянула AH за пределы r_* (тогда trapped-зона уже
+            # внутри AH тоже эффективно SdS).
+            r_freeze_phys = max(
+                _bh_influence_radius_vs_lambda(
+                    float(getattr(self, 'accumulated_bh_mass', 0.0))
+                ),
+                absorption_radius,
+            )
+            if r_freeze_phys > 0.0:
+                self._freeze_redshift_inside_bh_influence(r_freeze_phys, scale_factor)
+            else:
+                self._sync_a_freeze_length()
+
             if absorption_radius > 0.0:
                 absorbed = r_photon <= absorption_radius
             else:
                 absorbed = self._laser_photon_chi <= 0.0
 
             if np.any(absorbed):
+                a_eff_absorbed = self._effective_redshift_a_now(scale_factor, absorbed)
                 absorbed_mass = cosmological_redshifted_photon_mass_kg(
                     self._laser_photon_mass_emit_kg[absorbed],
                     self._laser_photon_a_emit[absorbed],
-                    scale_factor,
+                    a_eff_absorbed,
                 )
                 dM = float(np.sum(absorbed_mass))
                 self.accumulated_bh_mass += dM
@@ -666,9 +831,27 @@ class MatterPoints:
         self.laser_emitter_mask = d < chi_threshold
 
     def init_laser_emitter_mask(self, n: int, *args, **kwargs) -> None:
-        """Заполнить маску после инициализации координат (ожидается len(points_comoving) == n)."""
+        """Заполнить маску после инициализации координат (ожидается len(points_comoving) == n).
+
+        Если переданы ``(r_emission_boundary, scale_factor)`` (как в MatterSimulation),
+        маска совпадает с логикой ``add_points``: ``|χ|·a < r_boundary``; при
+        ``r_boundary == +inf`` — все точки эмиттеры.
+        """
         if self.points_comoving is None or len(self.points_comoving) != n:
             return
+        r_emission_boundary = args[0] if len(args) > 0 else None
+        scale_factor = args[1] if len(args) > 1 else None
+        sf = float(scale_factor) if scale_factor is not None else 0.0
+        if r_emission_boundary is not None and sf > 0.0:
+            rb = float(r_emission_boundary)
+            if np.isposinf(rb):
+                self.laser_emitter_mask = np.ones(n, dtype=bool)
+                return
+            if rb > 0.0 and np.isfinite(rb):
+                chi_max = rb / sf
+                d = np.sqrt(np.sum(self.points_comoving ** 2, axis=1))
+                self.laser_emitter_mask = d < chi_max
+                return
         self._set_laser_emitter_mask_inside_event_horizon()
 
     def total_laser_emitters_power_w(
@@ -695,7 +878,12 @@ class MatterPoints:
     def total_in_flight_laser_photon_mass_kg(self, scale_factor: float) -> tuple[float, int]:
         """
         Суммарная масса-эквивалент E/c² всех дискретных лазерных фотонов в полёте и их число.
-        Для каждого пакета: m(t_now) = m_emit * a_emit / a_now (космологический redshift энергии).
+
+        Для каждого пакета: m(t_now) = m_emit · a_emit/a_eff(t_now), где
+        a_eff = a_freeze, если фотон уже пересёк сферу SdS-доминирования ЦЧД
+        (см. `_advance_and_absorb_laser_photons`), иначе a_eff = a(t_now).
+        Это обеспечивает сохранение E_∞ внутри SdS-зоны и совпадает с
+        чистым FRW-redshift вне её.
         """
         a_now = float(scale_factor)
         if a_now <= 0.0:
@@ -708,7 +896,8 @@ class MatterPoints:
         n = int(m_emit.shape[0])
         if n == 0 or a_emit.shape[0] != n or int(np.asarray(chi).shape[0]) != n:
             return 0.0, 0
-        m_sum = float(np.sum(cosmological_redshifted_photon_mass_kg(m_emit, a_emit, a_now)))
+        a_eff = self._effective_redshift_a_now(a_now)
+        m_sum = float(np.sum(cosmological_redshifted_photon_mass_kg(m_emit, a_emit, a_eff)))
         return m_sum, n
 
     def _build_in_flight_laser_state(
@@ -725,7 +914,11 @@ class MatterPoints:
         Источник в этой модели приближённо считается зафиксированным в сопутствующей
         координате χ_initial = r_initial / a(t_start). Фотон, испущенный в момент τ,
         находится в момент t_now в χ(τ) = χ_initial − c·[η(t_now) − η(τ)] и
-        несёт энергию E = (P·dτ)·a(τ)/a_now (single-photon redshift).
+        несёт энергию E = (P·dτ)·a(τ)/a_now (single-photon redshift). ВНИМАНИЕ:
+        эта «continuous-laser» ветка — legacy/неиспользуемая; основной расчёт
+        идёт через дискретные пакеты в _advance_and_absorb_laser_photons, где
+        cosmological redshift «замораживается» при входе в сферу SdS-доминирования
+        ЦЧД (см. там).
 
         absorption_radius_m — радиус поглощения, обычно горизонт ЧД. Фотоны,
         уже пересёкшие этот радиус, считаются поглощёнными ЦЧД и НЕ входят
@@ -861,10 +1054,14 @@ class MatterPoints:
             return None
 
         r_valid = r_photon[valid]
+        # a_eff: для пакетов в SdS-зоне ЦЧД (a_freeze задан) — замороженный a,
+        # иначе текущий a(t_now). Это держит M(<r) в условии apparent horizon
+        # самосогласованным с тем, как поглощается энергия в ЦЧД.
+        a_eff_all = self._effective_redshift_a_now(scale_factor)
         photon_mass = cosmological_redshifted_photon_mass_kg(
             self._laser_photon_mass_emit_kg[valid],
             self._laser_photon_a_emit[valid],
-            scale_factor,
+            a_eff_all[valid],
         )
         order = np.argsort(r_valid)
         r_sorted = r_valid[order]
@@ -907,7 +1104,18 @@ class MatterPoints:
           • η ∈ [0,1] — доля dt, в которую лазер реально излучает (η<1 если
             burnable mass закончилась до конца dt);
           • поглощаемая ЦЧД масса с космологическим redshift по пути:
-            dM_bh_arrival = (E_phot_∞/c²) · a(t_emit)/a(t_arrival).
+            dM_bh_arrival = (E_phot_∞/c²) · a(t_emit)/a_eff(t_arrival).
+            a_eff = a_freeze, если фотон уже пересёк сферу SdS-доминирования
+            ЦЧД r_*³ = 3·r_S/Λ (см. `_bh_influence_radius_vs_lambda` и
+            `_advance_and_absorb_laser_photons`); иначе a_eff = a(t_arrival).
+            Физика: в гибридной модели «FRW + точечная масса» вне r_*
+            работает McVittie-подобный предел с обычным FRW-redshift; внутри
+            r_* локальная метрика — статический SdS, и E_∞ становится точным
+            инвариантом нулевой геодезики (Killing-энергия), поэтому
+            дальнейшее «растягивание» по a(t) физически некорректно. Это
+            особенно важно вблизи Nariai: r_* приближается к r_N, фотон
+            проводит ощутимое время в SdS-зоне до достижения r_AH, и без
+            freeze-механизма доставка энергии в ЦЧД систематически занижалась бы.
             Gravitational blueshift у горизонта учтён АВТОМАТИЧЕСКИ, так как
             мы храним именно E_∞ — она инвариантна вдоль нулевой SdS-геодезики
             и равна ADM-вкладу в массу ЦЧД.
@@ -1086,8 +1294,13 @@ class MatterPoints:
         #     blueshift при подлёте к ЦЧД учтён автоматически: static observer
         #     near horizon видит E_local = E_∞/√f → ∞, но в ADM-массу ЦЧД
         #     добавляется именно E_∞/c²).
-        #   • При поглощении ЦЧД: dM_bh = (E_phot_∞/c²)·a(t_emit)/a(t_now)
-        #     с учётом дополнительного космологического redshift по пути.
+        #   • При поглощении ЦЧД: dM_bh = (E_phot_∞/c²)·a(t_emit)/a_eff(t_now),
+        #     где a_eff = a_freeze, если фотон уже зашёл в сферу SdS-доминирования
+        #     ЦЧД (r_*³ = 3·r_S/Λ; см. `_bh_influence_radius_vs_lambda`), иначе
+        #     a_eff = a(t_now). Эта поправка важна вблизи Nariai: внутри r_*
+        #     метрика локально SdS, E_∞ — инвариант, и FRW-redshift более не
+        #     должен накапливаться. См. подробный вывод в docstring
+        #     `_advance_and_absorb_laser_photons` и `update_positions_and_velocities`.
         limit_to_planck = getattr(config, 'LIMIT_TOTAL_POWER_TO_PLANCK', False)
         thrust_spec = float(getattr(config, 'MATTER_THRUST_POWER_PER_KG_W', 0.0))
         M_bh_total = float(getattr(self, 'accumulated_bh_mass', 0.0))

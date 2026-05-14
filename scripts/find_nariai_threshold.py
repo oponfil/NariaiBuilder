@@ -44,11 +44,11 @@ from utils.sweep import (
 # Настройки свипа по эпохам и симуляции
 # =============================================================================
 # Начальное время сканирования по времени (в годах)
-_SWEEP_START_TIME_YEARS = 0.01e9
+_SWEEP_START_TIME_YEARS = 0.1e9
 # Максимальное время сканирования по времени (в годах)
-_SWEEP_END_TIME_YEARS = 1.5e9
+_SWEEP_END_TIME_YEARS = 15.0e9
 # Шаг сканирования по времени (в годах)
-_SWEEP_STEP_YEARS = 0.01e9
+_SWEEP_STEP_YEARS = 0.1e9
 # Максимальное время ожидания симуляции, пока фотоны долетят до центра (в годах)
 _MAX_SIMULATION_WAIT_YEARS = float(config.MAX_TIME_YEARS)
 
@@ -58,7 +58,7 @@ _MAX_SIMULATION_WAIT_YEARS = float(config.MAX_TIME_YEARS)
 # Максимально допустимая мощность, чтобы избежать бесконечного цикла (Вт/кг)
 _SEARCH_MAX_POWER_W = 1.0e6
 # Требуемая точность бинарного поиска (Вт/кг)
-_SEARCH_POWER_TOLERANCE_W = 0.01
+_SEARCH_POWER_TOLERANCE_W = 0.1
 
 # Ключи в общем JSON-кэше
 _CACHE_KEY_SUCCESS = "successful_runs"
