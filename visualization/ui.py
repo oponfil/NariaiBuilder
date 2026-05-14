@@ -29,21 +29,23 @@ RULER_COMOVING_TEXT = "10 billion ly (comoving)"
 # Горизонты (линии и подписи на экране)
 HORIZON_LINE_WIDTH = 1
 HORIZON_HUBBLE_COLOR: Tuple[int, int, int] = (255, 200, 0)
-HORIZON_DE_SITTER_COLOR: Tuple[int, int, int] = (0, 255, 255)
-HORIZON_EVENT_COLOR: Tuple[int, int, int] = (150, 150, 150)
+HORIZON_DE_SITTER_COLOR: Tuple[int, int, int] = (150, 150, 150)
+HORIZON_EVENT_COLOR: Tuple[int, int, int] = (0, 255, 255)
 HORIZON_PARTICLE_COLOR: Tuple[int, int, int] = (255, 100, 100)
 HORIZON_BLACK_HOLE_COLOR: Tuple[int, int, int] = (200, 0, 200)
 HORIZON_BLACK_HOLE_NARIAI_COLOR: Tuple[int, int, int] = (0, 150, 0)
-HORIZON_HUBBLE_LABEL = "LTB Hubble"
-HORIZON_DE_SITTER_LABEL = "de Sitter (empty universe)"
+HORIZON_HUBBLE_LABEL = "Hubble"
+HORIZON_DE_SITTER_LABEL = "de Sitter"
 HORIZON_EVENT_LABEL = "Event"
 HORIZON_PARTICLE_LABEL = "Particle"
 HORIZON_BLACK_HOLE_LABEL = "BH Event"
-HORIZON_HUBBLE_OFFSET_Y = -35
+# Подписи 12 ч / 6 ч: сдвиг по X (+ вправо). Подписи 9 ч (de Sitter) / 3 ч (Causal): сдвиг по Y (+ вниз).
+HORIZON_HUBBLE_OFFSET_Y = 0
 HORIZON_DE_SITTER_OFFSET_Y = 0
-HORIZON_EVENT_OFFSET_Y = 35
+HORIZON_EVENT_OFFSET_Y = 0
 HORIZON_PARTICLE_OFFSET_Y = 70
 HORIZON_BLACK_HOLE_OFFSET_Y = -70
+HORIZON_CAUSAL_OFFSET_Y = 0
 
 # Инфопанель
 INFO_TEXT_COLOR: Tuple[int, int, int] = (200, 200, 200)

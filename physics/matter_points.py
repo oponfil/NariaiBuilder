@@ -151,6 +151,9 @@ class MatterPoints:
         # кадр. Обновляются вместе с velocities_comoving.
         self._v_sq_comoving = None
         self._v_sq_max = 0.0
+        # a(t), при котором валидны текущие velocities_comoving (см.
+        # _recompute_velocity_norms — там полное обоснование).
+        self._velocities_scale_factor = None
         # Отсортированный массив индексов точек, поглощённых ЦЧД. Кэш для
         # инвалидации active_mask без пересоздания каждый раз.
         # Перестраивается лениво при cache miss по _points_inside_bh_version.
@@ -269,13 +272,23 @@ class MatterPoints:
             self.comoving_distances = None
         self._comoving_distances_version += 1
 
-    def _recompute_velocity_norms(self):
+    def _recompute_velocity_norms(self, scale_factor: float | None = None):
         """Пересчитать norm² comoving-скоростей и обновить max + версию.
 
         Вынесено сюда, чтобы MassCalculator не запускал einsum по полному
         массиву (N,3) каждый кадр. _v_sq_comoving имеет ту же длину, что
         velocities_comoving; _v_sq_max используется для O(1) проверки порога
         γ-коррекции (_BETA2_NEGLIGIBLE_THRESHOLD в mass_calculator).
+
+        scale_factor: a(t), при котором эти velocities_comoving валидны.
+            Сохраняется в `_velocities_scale_factor` и используется γ-коррекцией
+            (β² = v² · a_stored² / c²) ВМЕСТО текущего a. Это критично: между
+            update_positions и следующим update_positions main loop успевает
+            продвинуть cosmology.scale_factor; если использовать новый a,
+            самые быстрые точки переезжают через β² > 1, clip → γ = 10⁶, и
+            одна точка вкладывает ~10⁶·m_rest в M(<r), сдвигая корни g(r)=0.
+            Stored a гарантирует, что β² ≤ 1 строго, как и было в момент
+            update_positions.
         """
         v = self.velocities_comoving
         if v is None or len(v) == 0:
@@ -284,6 +297,8 @@ class MatterPoints:
         else:
             self._v_sq_comoving = np.einsum('ij,ij->i', v, v)
             self._v_sq_max = float(self._v_sq_comoving.max()) if self._v_sq_comoving.size > 0 else 0.0
+        if scale_factor is not None and float(scale_factor) > 0.0:
+            self._velocities_scale_factor = float(scale_factor)
         self._velocities_version += 1
 
     def _bump_masses_version(self):
@@ -1409,7 +1424,9 @@ class MatterPoints:
         # ОПТИМИЗАЦИЯ: Пересчитываем v² и его max — это позволяет
         # MassCalculator избегать полного einsum по (N,3) при γ-коррекции
         # и проверять порог _BETA2_NEGLIGIBLE_THRESHOLD (mass_calculator) за O(1).
-        self._recompute_velocity_norms()
+        # Передаём scale_factor — γ-коррекция должна использовать ИМЕННО его,
+        # а не cosmology.scale_factor, который уйдёт вперёд к следующему шагу.
+        self._recompute_velocity_norms(scale_factor=scale_factor)
         # masses_per_point могли быть «прожжены» лазером в этом шаге — поднимаем
         # версию (дёшево; служит ключом инвалидации внешних кэшей m_eff).
         self._bump_masses_version()
@@ -1419,7 +1436,13 @@ class MatterPoints:
             time.perf_counter() - t_prof - self._profile_step_photons_s,
         )
 
-    def add_points(self, new_points: np.ndarray, scale_factor: float = None, scale_ratio: float = None):
+    def add_points(
+        self,
+        new_points: np.ndarray,
+        scale_factor: float = None,
+        scale_ratio: float = None,
+        r_emission_boundary: float | None = None,
+    ):
         """
         Добавить новые точки к существующим.
         
@@ -1427,6 +1450,9 @@ class MatterPoints:
             new_points: Массив новых точек (N x 3)
             scale_factor: Текущий масштабный фактор (оставлен для совместимости вызовов)
             scale_ratio: Коэффициент роста горизонта частиц (оставлен для совместимости вызовов)
+            r_emission_boundary: Опционально — граница эмиссии в физических метрах (LTB),
+                как в ``update_positions``; маска: |χ|·a < r_emission_boundary.
+                Если None или невалидно, используется FLRW χ_event(t_collapse).
         """
         # ВАЖНО: Новые точки уже перемешаны в matter_simulation после генерации
         # Не нужно перемешивать их снова или перемешивать все точки вместе
@@ -1456,7 +1482,14 @@ class MatterPoints:
             else:
                 self.masses_per_point = np.concatenate([self.masses_per_point, new_masses])
         
-        self._set_laser_emitter_mask_inside_event_horizon()
+        sf = float(scale_factor) if scale_factor is not None else 0.0
+        rb = float(r_emission_boundary) if r_emission_boundary is not None else 0.0
+        if rb > 0.0 and sf > 0.0 and self.points_comoving is not None:
+            chi_max = rb / sf
+            d = np.sqrt(np.sum(self.points_comoving ** 2, axis=1))
+            self.laser_emitter_mask = d < chi_max
+        else:
+            self._set_laser_emitter_mask_inside_event_horizon()
 
         # inside_bh_mask должен расти вместе с points_comoving (новые точки → False).
         self._ensure_inside_bh_mask()
@@ -1465,5 +1498,7 @@ class MatterPoints:
         # после добавления точек, поднимаем версию масс — внешние кэши
         # (MassCalculator) корректно инвалидируются.
         self._update_comoving_distances()
-        self._recompute_velocity_norms()
+        # Новые точки имеют v=0, и a соответствует scale_factor вызова —
+        # сохраняем его, чтобы γ-коррекция знала «при каком a» эти velocities.
+        self._recompute_velocity_norms(scale_factor=sf if sf > 0.0 else None)
         self._bump_masses_version()

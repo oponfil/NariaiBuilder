@@ -29,6 +29,7 @@ try:
 except ModuleNotFoundError:
     from scripts import _bootstrap  # noqa: F401  -- from scripts.<name> import ...
 
+import config
 from utils.constants import NARIAI_BLACK_HOLE_MASS_KG
 from utils.headless_sim import SimConfig, run_headless_simulation
 from utils.json_cache import JsonCache
@@ -49,7 +50,7 @@ _SWEEP_END_TIME_YEARS = 1.5e9
 # Шаг сканирования по времени (в годах)
 _SWEEP_STEP_YEARS = 0.01e9
 # Максимальное время ожидания симуляции, пока фотоны долетят до центра (в годах)
-_MAX_SIMULATION_WAIT_YEARS = 100.0e9
+_MAX_SIMULATION_WAIT_YEARS = float(config.MAX_TIME_YEARS)
 
 # =============================================================================
 # Настройки бинарного поиска

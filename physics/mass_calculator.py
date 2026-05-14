@@ -16,6 +16,7 @@ from physics.apparent_horizon import (
 )
 from physics.nariai import (
     cosmological_constant_lambda,
+    schwarzschild_de_sitter_horizons,
 )
 from utils.constants import (
     G,
@@ -226,7 +227,7 @@ class MassCalculator:
         self.last_bh_horizon_update_time = float(universe.time)
         self.last_calculated_time = float(universe.time)
         return bh_growth_velocity_radius
-    
+
     def calculate_masses(
         self,
         universe,
@@ -333,6 +334,125 @@ class MassCalculator:
         # apparent inner horizon.
         r_black_hole_classical = self._black_hole_radius_for_mass(M_black_hole)
         r_black_hole_schwarzschild = r_black_hole_classical
+
+        # Упрощённый режим: учитываем только центральную ЧД + гладкий FRW-фон
+        # материи (через ρ_m(t)), без дискретных оболочек и фотонов в полёте.
+        if bool(getattr(config, 'SIMPLIFIED_MASSES_BH_ONLY', False)):
+            _t_simple_horizons = time.perf_counter()
+            # Уравнение outer apparent horizon для «BH + гладкий FRW-фон»:
+            #     1 − 2GM_BH/(c²r) − r²·H(t)²/c² = 0,
+            # т.к. H²(t) = (8πG/3)·ρ_m(t) + Λc²/3, то это эквивалентно SdS
+            # с эффективной космологической постоянной
+            #     Λ_eff(t) = 3·(H(t)/c)².
+            # На раннем времени H большая → Λ_eff большая → горизонт маленький;
+            # при ρ_m → 0 горизонт стремится к вакуумному r_dS = √(3/Λ).
+            h_t = float(cosmology.hubble_parameter(universe.time))
+            lam_eff = 3.0 * (h_t / c) ** 2 if h_t > 0.0 else cosmological_constant_lambda()
+            try:
+                r_inner_sds, r_outer_sds = schwarzschild_de_sitter_horizons(
+                    M_black_hole, lam_eff,
+                )
+            except Exception:
+                r_inner_sds = r_black_hole_classical
+                r_outer_sds = c / h_t if h_t > 0.0 else float(cosmology.de_sitter_horizon(0.0))
+            r_hubble_horizon = float(r_outer_sds)
+            # Event horizon в матер. эпоху ФИЗИЧЕСКИ БОЛЬШЕ apparent/Hubble:
+            # свет, испущенный сейчас извне r_H, ещё может догнать наблюдателя
+            # за счёт замедления расширения. Совпадают они только в de Sitter.
+            #
+            # BH также стягивает event horizon (в чисто Λ-пределе оба сходятся
+            # к r_N при M → M_N). Честный расчёт идёт через scipy.solve_ivp,
+            # что противоречит цели simplified-режима.
+            #
+            # Упрощение: масштабируем FLRW event horizon на ту же относительную
+            # SdS-поправку, что и Hubble (отношение «outer SdS с M / outer SdS
+            # без M» при той же Λ_eff = c/H). Свойства приближения:
+            #   • M = 0: r_event = r_event_FLRW (чистый FLRW)        ✓
+            #   • M → M_N в Λ-эпоху: оба горизонта → r_N             ✓
+            #   • r_event ≥ r_hubble в матер. эпоху                  ✓
+            r_event_flrw = float(
+                cosmology.cosmological_event_horizon(universe.time)
+            )
+            r_hubble_no_bh = c / h_t if h_t > 0.0 else float(r_outer_sds)
+            if r_hubble_no_bh > 0.0:
+                bh_shrink_factor = r_hubble_horizon / r_hubble_no_bh
+            else:
+                bh_shrink_factor = 1.0
+            r_event_horizon = r_event_flrw * bh_shrink_factor
+            # На случай, если численно r_event < r_hubble (на больших t они
+            # сходятся к одному пределу) — поднимаем до r_hubble.
+            if r_event_horizon < r_hubble_horizon:
+                r_event_horizon = r_hubble_horizon
+            r_de_sitter_classical_m = float(r_de_sitter_horizon)
+            # Для совместимости с UI: исторически r_de_sitter_horizon_m хранит
+            # внешний «сценарный» горизонт (в полном режиме это outer apparent).
+            r_de_sitter_horizon = r_hubble_horizon
+            # Inner apparent horizon ЦЧД из SdS-аналитики (учитывает Λ-поправку
+            # к чистому Шварцшильду; при M→M_N стягивается к r_N).
+            r_apparent_inner_horizon = float(r_inner_sds)
+            if r_apparent_inner_horizon > 0.0:
+                r_black_hole_schwarzschild = r_apparent_inner_horizon
+
+            if (
+                np.isfinite(r_black_hole_schwarzschild)
+                and r_black_hole_schwarzschild > 0.0
+                and r_event_horizon < r_black_hole_schwarzschild
+            ):
+                r_event_horizon = float(r_black_hole_schwarzschild)
+
+            self._last_ltb_horizon_solve_seconds = (
+                time.perf_counter() - _t_simple_horizons
+            )
+
+            M_BH_inside = float(M_black_hole)
+            M_hubble_horizon = M_BH_inside
+            M_particle_horizon = M_BH_inside
+            M_event_horizon = M_BH_inside
+            M_de_sitter_horizon = M_BH_inside
+            M_matter_inside_de_sitter = 0.0
+            M_laser_inside_de_sitter = 0.0
+            M_bg_inside_de_sitter = (
+                rho_matter * (4.0 / 3.0) * np.pi * (r_de_sitter_horizon ** 3)
+            )
+            M_eff_de_sitter = M_BH_inside
+
+            bh_growth_velocity_radius = self._advance_bh_horizon_velocity_ema(
+                universe,
+                float(r_black_hole_schwarzschild),
+                paused,
+            )
+            self.previous_bh_mass = float(M_black_hole)
+            bh_growth_velocity_formatted = format_velocity_m_per_s(
+                bh_growth_velocity_radius
+            )
+
+            self._last_calculate_masses_points_seconds = (
+                time.perf_counter() - t_method_start
+            )
+
+            return {
+                'M_hubble_horizon_kg': M_hubble_horizon,
+                'M_particle_horizon_kg': M_particle_horizon,
+                'M_event_horizon_kg': M_event_horizon,
+                'M_de_sitter_horizon_kg': M_de_sitter_horizon,
+                'M_nariai_kg': M_nariai,
+                'M_black_hole_kg': M_black_hole,
+                'M_black_hole_initial_kg': M_black_hole_initial,
+                'r_black_hole_schwarzschild_m': r_black_hole_schwarzschild,
+                'r_apparent_inner_horizon_m': r_apparent_inner_horizon,
+                'r_black_hole_classical_m': r_black_hole_classical,
+                'bh_growth_velocity_radius_m_per_s': bh_growth_velocity_radius,
+                'bh_growth_velocity_formatted': bh_growth_velocity_formatted,
+                'r_hubble_horizon_m': r_hubble_horizon,
+                'r_particle_horizon_m': r_particle_horizon,
+                'r_event_horizon_m': r_event_horizon,
+                'r_de_sitter_horizon_m': r_de_sitter_horizon,
+                'r_de_sitter_classical_m': r_de_sitter_classical_m,
+                'M_eff_de_sitter_kg': M_eff_de_sitter,
+                'M_matter_inside_de_sitter_kg': M_matter_inside_de_sitter,
+                'M_laser_inside_de_sitter_kg': M_laser_inside_de_sitter,
+                'M_bg_inside_de_sitter_kg': M_bg_inside_de_sitter,
+            }
 
         # Горизонты уже посчитаны/взяты из кэша по (time, M_bh_current)
         # выше — переиспользуем без повторных вызовов cosmology.
@@ -445,9 +565,17 @@ class MassCalculator:
                 # _v_sq_max за O(1).
                 v_sq_full = matter_points._v_sq_comoving
                 v_sq_max = float(matter_points._v_sq_max)
+                # См. apparent_horizon.build_active_matter_state и
+                # MatterPoints._recompute_velocity_norms: β² должна считаться
+                # с a, при котором были обновлены velocities_comoving, иначе
+                # прыжок cosmology.scale_factor между шагами приводит к
+                # β² > 1 → clip → γ = 10⁶ → нефизичный спайк M(<r).
+                a_for_gamma = getattr(matter_points, '_velocities_scale_factor', None)
+                if a_for_gamma is None or float(a_for_gamma) <= 0.0:
+                    a_for_gamma = float(scale_factor)
                 if (n_active > 0 and v_sq_full is not None
-                        and len(v_sq_full) == len(cd) and scale_factor > 0):
-                    sf2_over_c2 = (scale_factor * scale_factor) / (c * c)
+                        and len(v_sq_full) == len(cd) and a_for_gamma > 0):
+                    sf2_over_c2 = (a_for_gamma * a_for_gamma) / (c * c)
                     beta2_max = v_sq_max * sf2_over_c2
                     if beta2_max < _BETA2_NEGLIGIBLE_THRESHOLD:
                         m_eff_a = masses_active
@@ -558,6 +686,7 @@ class MassCalculator:
             r_event_horizon = compute_ltb_event_horizon(
                 universe.time, M_black_hole, matter_state, laser_mass_state,
                 scale_factor, lam_apparent, r_hubble_horizon,
+                a_at_seconds=cosmology._get_scale_factor_for_time,
             )
 
         # --- Apparent inner horizon (горизонт ЦЧД) ---
@@ -575,6 +704,39 @@ class MassCalculator:
             r_apparent_inner_horizon = 0.0
         if r_apparent_inner_horizon > 0.0:
             r_black_hole_schwarzschild = r_apparent_inner_horizon
+
+        # ── Физический lower bound: r_event ≥ r_inner_AH ──
+        #
+        # Внешний (космологический) event horizon в SdS-подобной геометрии всегда
+        # удовлетворяет r_event ≥ r_inner_BH_AH; равенство — в точке слияния
+        # (предел Нараи). Поэтому r_event визуально не имеет права уходить
+        # ВНУТРЬ горизонта самой ЦЧД.
+        #
+        # Backward-интегрирование сепаратрисы dr/dt = R_dot − c в
+        # compute_ltb_event_horizon становится численно неустойчивым, когда
+        # M(<r) сильно overcritical (overconcentrated кластер + M_BH ~ M_N):
+        # тогда стартовая точка r_outer_future упирается в верхнюю границу
+        # √(3/Λ), R_dot² = 2GM/r + Λc²r²/3 в этой точке кратно c², и
+        # интегратор за конечное число шагов «убегает» к малым r — возвращает
+        # значение, которое может оказаться < r_inner_AH (визуально это
+        # выглядит как «event horizon в 5 раз меньше горизонта ЦЧД» — нефизично).
+        #
+        # Здесь, в MassCalculator, у нас уже есть r_apparent_inner_horizon,
+        # посчитанный с полным состоянием (M_BH + matter + laser в полёте),
+        # поэтому именно тут безопасно поставить lower clamp.
+        # NB: используем r_black_hole_schwarzschild (отображаемый «горизонт ЦЧД»),
+        # а не «голый» r_apparent_inner_horizon. В Нараи-режиме, когда
+        # r_classical = 2GM/c² > r_hubble, solve_apparent_inner_horizon выше
+        # отдаёт 0 (нет валидного интервала для скана), и displayed r_BH
+        # падает обратно на r_classical. Клип должен следовать за этой
+        # же визуальной величиной, иначе на экране r_event окажется внутри
+        # видимого горизонта ЦЧД, чего быть не должно.
+        if (
+            np.isfinite(r_black_hole_schwarzschild)
+            and r_black_hole_schwarzschild > 0.0
+            and r_event_horizon < r_black_hole_schwarzschild
+        ):
+            r_event_horizon = float(r_black_hole_schwarzschild)
 
         self._last_ltb_horizon_solve_seconds = (
             time.perf_counter() - _t_ltb_horizons

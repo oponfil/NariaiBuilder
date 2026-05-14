@@ -59,6 +59,19 @@ class InputHandler:
                         elif renderer.ui_rects.get("dist") and renderer.ui_rects["dist"].collidepoint(mouse_pos):
                             toggle_matter_distribution_mode()
                             return "CONTINUE"
+                        elif (
+                            renderer.ui_rects.get("photons_outside_ds")
+                            and renderer.ui_rects["photons_outside_ds"].collidepoint(mouse_pos)
+                        ):
+                            renderer.show_laser_photons_outside_ds_ref = (
+                                not bool(
+                                    getattr(
+                                        renderer,
+                                        "show_laser_photons_outside_ds_ref",
+                                        True,
+                                    )
+                                )
+                            )
             
             elif event.type == pygame.MOUSEWHEEL:
                 zoom_factor = 1.1

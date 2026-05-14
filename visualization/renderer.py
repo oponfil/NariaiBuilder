@@ -28,7 +28,7 @@ from utils.config_utils import (
 _PHOTON_LASER_RGB_CHANNEL_MAX = 255.0
 _PHOTON_LASER_COLOR_P_MIDPOINT = 0.5
 # p = u^γ, u = a_emit/a_now. γ=1 — равные половины по u; γ<1 растягивает синий↔зелёный по u.
-_MATTER_LASER_PHOTON_COLOR_GAMMA = 0.8
+_MATTER_LASER_PHOTON_COLOR_GAMMA = 1.0
 
 
 def photon_rgb_blue_green_red(factor_a_emit_over_now: np.ndarray) -> np.ndarray:
@@ -305,7 +305,9 @@ class UniverseRenderer:
         # Флаги отображения
         self.show_info = True
         self.show_horizons = True
-        
+        # UI: вкл — рисовать фотоны и за эталоном de Sitter (Λ=0 пунктир); выкл — только r≤r_dS.
+        self.show_laser_photons_outside_ds_ref = True
+
         # Состояние паузы (запускаем симуляцию на паузе по умолчанию)
         self.paused = True
         # На паузе стрелки сдвигают t и a(t); один шаг физики за кадр
@@ -392,6 +394,7 @@ class UniverseRenderer:
         self._spiral_display_angles_cache_n = -1
         self._spiral_display_angles_cache_id = None
         self.invalidate_mass_cache()
+        self.info_panel.reset_photon_mass_label_hold()
 
     def _is_spiral_display(self) -> bool:
         """True, если точки и фотоны нужно показывать в виде спирали.
@@ -823,7 +826,87 @@ class UniverseRenderer:
                 if radius_int > max_radius:
                     radius_int = max_radius
                 return radius_int
-            
+
+            def blit_horizon_labels_top(name_surf, value_surf, cx, cy, r_px, dx=0):
+                """Имя и число над верхней точкой круга (12 ч); dx — сдвиг по X от центра экрана."""
+                margin = 4
+                nh = name_surf.get_height()
+                nw = name_surf.get_width()
+                vh = value_surf.get_height()
+                vw = value_surf.get_width()
+                name_y = cy - r_px - margin - nh - vh
+                value_y = name_y + nh
+                name_x = cx - nw // 2 + dx
+                value_x = cx - vw // 2 + dx
+                if (
+                    0 <= name_x
+                    and name_x + nw <= self.width
+                    and 0 <= name_y
+                    and value_y + vh <= self.height
+                ):
+                    self.screen.blit(name_surf, (name_x, name_y))
+                    self.screen.blit(value_surf, (value_x, value_y))
+
+            def blit_horizon_labels_bottom(name_surf, value_surf, cx, cy, r_px, dx=0):
+                """Имя и число под нижней точкой круга (6 ч); dx — сдвиг по X от центра экрана."""
+                margin = 4
+                nh = name_surf.get_height()
+                nw = name_surf.get_width()
+                vh = value_surf.get_height()
+                vw = value_surf.get_width()
+                name_y = cy + r_px + margin
+                value_y = name_y + nh
+                name_x = cx - nw // 2 + dx
+                value_x = cx - vw // 2 + dx
+                if (
+                    0 <= name_x
+                    and name_x + nw <= self.width
+                    and 0 <= name_y
+                    and value_y + vh <= self.height
+                ):
+                    self.screen.blit(name_surf, (name_x, name_y))
+                    self.screen.blit(value_surf, (value_x, value_y))
+
+            def blit_horizon_labels_left(name_surf, value_surf, cx, cy, r_px, dy=0):
+                """Слева у круга (9 ч); текст правее не заходит на окружность; dy — сдвиг по Y (+ вниз)."""
+                margin = 4
+                nh = name_surf.get_height()
+                nw = name_surf.get_width()
+                vh = value_surf.get_height()
+                vw = value_surf.get_width()
+                name_y = cy - (nh + vh) // 2 + dy
+                value_y = name_y + nh
+                name_x = cx - r_px - margin - nw
+                value_x = cx - r_px - margin - vw
+                if (
+                    0 <= name_x
+                    and name_x + nw <= self.width
+                    and 0 <= name_y
+                    and value_y + vh <= self.height
+                ):
+                    self.screen.blit(name_surf, (name_x, name_y))
+                    self.screen.blit(value_surf, (value_x, value_y))
+
+            def blit_horizon_labels_right(name_surf, value_surf, cx, cy, r_px, dy=0):
+                """Справа у круга (3 ч); dy — сдвиг по Y (+ вниз)."""
+                margin = 4
+                nh = name_surf.get_height()
+                nw = name_surf.get_width()
+                vh = value_surf.get_height()
+                vw = value_surf.get_width()
+                name_y = cy - (nh + vh) // 2 + dy
+                value_y = name_y + nh
+                name_x = cx + r_px + margin
+                value_x = cx + r_px + margin
+                if (
+                    0 <= name_x
+                    and name_x + nw <= self.width
+                    and 0 <= name_y
+                    and value_y + vh <= self.height
+                ):
+                    self.screen.blit(name_surf, (name_x, name_y))
+                    self.screen.blit(value_surf, (value_x, value_y))
+
             # Горизонт Хаббла (голубой) - самый маленький
             if hubble_r < float('inf') and hubble_r > 0:
                 radius_int = scale_radius(hubble_r)
@@ -841,19 +924,18 @@ class UniverseRenderer:
                         radius_int, 
                         width=ui.HORIZON_LINE_WIDTH
                     )
-                    # Название горизонта - справа от круга
-                    label_x = center_x_int + radius_int + 5
-                    label_y = center_y_int + ui.HORIZON_HUBBLE_OFFSET_Y
-                    if 0 < label_x < self.width - 100 and 0 < label_y < self.height:
-                        text = self.small_font.render(ui.HORIZON_HUBBLE_LABEL, True, ui.HORIZON_HUBBLE_COLOR)
-                        self.screen.blit(text, (label_x, label_y))
-                        
-                        # Радиус горизонта - прямо под названием
-                        radius_text = f"{to_display_radius(hubble_r) / 9.461e24:.2f}"
-                        radius_label = self.small_font.render(radius_text, True, ui.HORIZON_HUBBLE_COLOR)
-                        radius_y = label_y + 18  # Под названием
-                        if 0 < label_x < self.width - 100 and 0 < radius_y < self.height:
-                            self.screen.blit(radius_label, (label_x, radius_y))
+                    # Подпись снизу (6 ч)
+                    text = self.small_font.render(ui.HORIZON_HUBBLE_LABEL, True, ui.HORIZON_HUBBLE_COLOR)
+                    radius_text = f"{to_display_radius(hubble_r) / 9.461e24:.2f}"
+                    radius_label = self.small_font.render(radius_text, True, ui.HORIZON_HUBBLE_COLOR)
+                    blit_horizon_labels_bottom(
+                        text,
+                        radius_label,
+                        center_x_int,
+                        center_y_int,
+                        radius_int,
+                        ui.HORIZON_HUBBLE_OFFSET_Y,
+                    )
             
             # Горизонт де Ситтера (желтый) - второй по размеру
             if de_sitter_r < float('inf') and de_sitter_r > 0:
@@ -879,19 +961,17 @@ class UniverseRenderer:
                                 (x2, y2),
                                 ui.HORIZON_LINE_WIDTH,
                             )
-                    # Название горизонта - справа от круга
-                    label_x = center_x_int + radius_int + 5
-                    label_y = center_y_int + ui.HORIZON_DE_SITTER_OFFSET_Y
-                    if 0 < label_x < self.width - 100 and 0 < label_y < self.height:
-                        text = self.small_font.render(ui.HORIZON_DE_SITTER_LABEL, True, ui.HORIZON_DE_SITTER_COLOR)
-                        self.screen.blit(text, (label_x, label_y))
-                        
-                        # Радиус горизонта - прямо под названием
-                        radius_text = f"{to_display_radius(de_sitter_r) / 9.461e24:.2f}"
-                        radius_label = self.small_font.render(radius_text, True, ui.HORIZON_DE_SITTER_COLOR)
-                        radius_y = label_y + 18  # Под названием
-                        if 0 < label_x < self.width - 100 and 0 < radius_y < self.height:
-                            self.screen.blit(radius_label, (label_x, radius_y))
+                    text = self.small_font.render(ui.HORIZON_DE_SITTER_LABEL, True, ui.HORIZON_DE_SITTER_COLOR)
+                    radius_text = f"{to_display_radius(de_sitter_r) / 9.461e24:.2f}"
+                    radius_label = self.small_font.render(radius_text, True, ui.HORIZON_DE_SITTER_COLOR)
+                    blit_horizon_labels_left(
+                        text,
+                        radius_label,
+                        center_x_int,
+                        center_y_int,
+                        radius_int,
+                        ui.HORIZON_DE_SITTER_OFFSET_Y,
+                    )
             
             # Горизонт событий (серый) - третий по размеру
             if event_r < float('inf') and event_r > 0:
@@ -909,19 +989,17 @@ class UniverseRenderer:
                         radius_int, 
                         width=ui.HORIZON_LINE_WIDTH
                     )
-                    # Название горизонта - справа от круга
-                    label_x = center_x_int + radius_int + 5
-                    label_y = center_y_int + ui.HORIZON_EVENT_OFFSET_Y
-                    if 0 < label_x < self.width - 100 and 0 < label_y < self.height:
-                        text = self.small_font.render(ui.HORIZON_EVENT_LABEL, True, ui.HORIZON_EVENT_COLOR)
-                        self.screen.blit(text, (label_x, label_y))
-                        
-                        # Радиус горизонта - прямо под названием
-                        radius_text = f"{to_display_radius(event_r) / 9.461e24:.2f}"
-                        radius_label = self.small_font.render(radius_text, True, ui.HORIZON_EVENT_COLOR)
-                        radius_y = label_y + 18  # Под названием
-                        if 0 < label_x < self.width - 100 and 0 < radius_y < self.height:
-                            self.screen.blit(radius_label, (label_x, radius_y))
+                    text = self.small_font.render(ui.HORIZON_EVENT_LABEL, True, ui.HORIZON_EVENT_COLOR)
+                    radius_text = f"{to_display_radius(event_r) / 9.461e24:.2f}"
+                    radius_label = self.small_font.render(radius_text, True, ui.HORIZON_EVENT_COLOR)
+                    blit_horizon_labels_top(
+                        text,
+                        radius_label,
+                        center_x_int,
+                        center_y_int,
+                        radius_int,
+                        ui.HORIZON_EVENT_OFFSET_Y,
+                    )
             
             # Горизонт частиц (красный) - самый большой
             if particle_r < float('inf') and particle_r > 0:
@@ -953,19 +1031,17 @@ class UniverseRenderer:
                             radius_int, 
                             width=ui.HORIZON_LINE_WIDTH
                         )
-                    # Название горизонта - справа от круга
-                    label_x = center_x_int + radius_int + 5
-                    label_y = center_y_int + ui.HORIZON_PARTICLE_OFFSET_Y
-                    if 0 < label_x < self.width - 100 and 0 < label_y < self.height:
-                        text = self.small_font.render(ui.HORIZON_PARTICLE_LABEL, True, ui.HORIZON_PARTICLE_COLOR)
-                        self.screen.blit(text, (label_x, label_y))
-                        
-                        # Радиус горизонта - прямо под названием
-                        radius_text = f"{to_display_radius(particle_r) / 9.461e24:.2f}"
-                        radius_label = self.small_font.render(radius_text, True, ui.HORIZON_PARTICLE_COLOR)
-                        radius_y = label_y + 18  # Под названием
-                        if 0 < label_x < self.width - 100 and 0 < radius_y < self.height:
-                            self.screen.blit(radius_label, (label_x, radius_y))
+                    text = self.small_font.render(ui.HORIZON_PARTICLE_LABEL, True, ui.HORIZON_PARTICLE_COLOR)
+                    radius_text = f"{to_display_radius(particle_r) / 9.461e24:.2f}"
+                    radius_label = self.small_font.render(radius_text, True, ui.HORIZON_PARTICLE_COLOR)
+                    blit_horizon_labels_bottom(
+                        text,
+                        radius_label,
+                        center_x_int,
+                        center_y_int,
+                        radius_int,
+                        ui.HORIZON_PARTICLE_OFFSET_Y,
+                    )
             
             # Причинный горизонт (белый сплошной) - самый большой
             # Это полный сопутствующий радиус chi_p(∞) = 63.6 Gly
@@ -985,19 +1061,17 @@ class UniverseRenderer:
                             width=ui.HORIZON_LINE_WIDTH,
                         )
                     
-                    # Название горизонта - справа от круга
-                    label_x = center_x_int + radius_int + 5
-                    label_y = center_y_int - 40  # Выше других
-                    if 0 < label_x < self.width - 100 and 0 < label_y < self.height:
-                        text = self.small_font.render("Causal", True, (255, 255, 255))
-                        self.screen.blit(text, (label_x, label_y))
-                        
-                        # Радиус горизонта - прямо под названием
-                        radius_text = f"{to_display_radius(causal_r) / 9.461e24:.2f}"
-                        radius_label = self.small_font.render(radius_text, True, (255, 255, 255))
-                        radius_y = label_y + 18  # Под названием
-                        if 0 < label_x < self.width - 100 and 0 < radius_y < self.height:
-                            self.screen.blit(radius_label, (label_x, radius_y))
+                    causal_name = self.small_font.render("Causal", True, (255, 255, 255))
+                    radius_text = f"{to_display_radius(causal_r) / 9.461e24:.2f}"
+                    causal_val = self.small_font.render(radius_text, True, (255, 255, 255))
+                    blit_horizon_labels_right(
+                        causal_name,
+                        causal_val,
+                        center_x_int,
+                        center_y_int,
+                        radius_int,
+                        ui.HORIZON_CAUSAL_OFFSET_Y,
+                    )
 
             
             # Горизонт событий центральной черной дыры (пурпурный)
@@ -1030,20 +1104,17 @@ class UniverseRenderer:
                                 radius_int, 
                                 width=ui.HORIZON_LINE_WIDTH
                             )
-                        # Название горизонта - справа от круга
-                        label_x = center_x_int + radius_int + 5
-                        label_y = center_y_int + ui.HORIZON_BLACK_HOLE_OFFSET_Y
-                        if 0 < label_x < self.width - 100 and 0 < label_y < self.height:
-                            text = self.small_font.render(ui.HORIZON_BLACK_HOLE_LABEL, True, black_hole_color)
-                            self.screen.blit(text, (label_x, label_y))
-                            
-                            # Радиус горизонта - прямо под названием
-                            # Форматируем так же, как другие горизонты (в млрд св. лет, 2 знака после запятой)
-                            radius_text = f"{to_display_radius(r_black_hole) / get_one_billion_ly():.2f}"
-                            radius_label = self.small_font.render(radius_text, True, black_hole_color)
-                            radius_y = label_y + 18  # Под названием
-                            if 0 < label_x < self.width - 100 and 0 < radius_y < self.height:
-                                self.screen.blit(radius_label, (label_x, radius_y))
+                        text = self.small_font.render(ui.HORIZON_BLACK_HOLE_LABEL, True, black_hole_color)
+                        radius_text = f"{to_display_radius(r_black_hole) / get_one_billion_ly():.2f}"
+                        radius_label = self.small_font.render(radius_text, True, black_hole_color)
+                        blit_horizon_labels_top(
+                            text,
+                            radius_label,
+                            center_x_int,
+                            center_y_int,
+                            radius_int,
+                            ui.HORIZON_BLACK_HOLE_OFFSET_Y,
+                        )
         except (ValueError, TypeError) as e:
             pass
     
@@ -1455,7 +1526,7 @@ class UniverseRenderer:
         horizon_radius_px = (particle_horizon_physical / TEN_BILLION_LY) * RULER_LENGTH_PX
         
         white_color = (255, 255, 255)
-        particle_color = ui.HORIZON_PARTICLE_COLOR  # Красный цвет для точек внутри горизонта частиц
+        de_sitter_point_color = ui.HORIZON_DE_SITTER_COLOR
         points_drawn = 0
         
         # ОПТИМИЗАЦИЯ: Используем переданные массы вместо повторного вызова calculate_masses
@@ -1507,11 +1578,13 @@ class UniverseRenderer:
                                   f"r_bh={r_black_hole:.2e} м ({r_black_hole/9.461e24:.4f} млрд св. лет)")
 
             if xi.size > 0:
-                # Цвет: белый внутри де Ситтера, particle_color снаружи.
+                # Внутри de Sitter — белый; снаружи — серый (цвет линии de Sitter на горизонтах).
                 color_mask_ds = distances_valid <= de_sitter_horizon_radius
                 white_packed = np.uint32(self.screen.map_rgb(white_color))
-                particle_packed = np.uint32(self.screen.map_rgb(particle_color))
-                packed = np.where(color_mask_ds, white_packed, particle_packed).astype(np.uint32, copy=False)
+                outside_ds_packed = np.uint32(self.screen.map_rgb(de_sitter_point_color))
+                packed = np.where(
+                    color_mask_ds, white_packed, outside_ds_packed
+                ).astype(np.uint32, copy=False)
 
                 px_size = int(getattr(config, 'MATTER_POINT_SCREEN_PX', 1))
                 offsets = _matter_point_square_offsets_int32(px_size) if px_size > 1 else None
@@ -1532,7 +1605,7 @@ class UniverseRenderer:
                         rgb = np.where(
                             color_mask_ds[:, None],
                             np.asarray(white_color, dtype=np.uint8),
-                            np.asarray(particle_color, dtype=np.uint8),
+                            np.asarray(de_sitter_point_color, dtype=np.uint8),
                         ).astype(np.uint8, copy=False)
                         pixels = pygame.surfarray.pixels3d(self.screen)
                         try:
@@ -1547,7 +1620,7 @@ class UniverseRenderer:
                         # Самый медленный фолбэк — попиксельная запись.
                         for idx in range(int(xi.size)):
                             try:
-                                c = white_color if color_mask_ds[idx] else particle_color
+                                c = white_color if color_mask_ds[idx] else de_sitter_point_color
                                 self.screen.set_at((int(xi[idx]), int(yi[idx])), c)
                             except (TypeError, ValueError, IndexError):
                                 continue
@@ -1576,6 +1649,7 @@ class UniverseRenderer:
         self.mass_calculator._last_calculate_masses_laser_prep_seconds = 0.0
         for _sim in self.matter_simulations.values():
             _sim._last_capture_ltb_horizons_seconds = 0.0
+            _sim._last_emission_boundary_seconds = 0.0
             _mp = _sim.matter_points
             _mp._profile_step_photons_s = 0.0
             _mp._profile_step_particles_s = 0.0
@@ -1600,15 +1674,39 @@ class UniverseRenderer:
         
         mp = self.matter_simulation.matter_points
         current_m_bh = getattr(mp, 'accumulated_bh_mass', 0.0)
+        # Радиус поглощения должен совпадать с видимой границей ЦЧД, иначе
+        # фотоны, визуально пересекающие отрисованный круг (apparent inner
+        # horizon, который включает все накопленные внутри фотоны/материю
+        # в M(<r)), фильтруются из draw_photons по `r_phys ≤ r_AH`, но при
+        # этом не поглощаются в _advance_and_absorb_laser_photons, потому
+        # что там сравнение шло с маленьким классическим r_classical = 2GM/c².
+        # Они невидимо сидят в зазоре [r_classical, r_AH], пока не дойдут до
+        # r_classical — отсюда «масса ЦЧД 100 кадров стоит, а потом скачком
+        # вырастает».
+        # Берём максимум классического Шварцшильда и apparent inner horizon
+        # из предыдущего кадра (тот же радиус, что рисуется как круг ЦЧД).
+        # На первом кадре cached_masses ещё нет → используем r_classical,
+        # на последующих — apparent inner horizon, согласованный с экраном.
         current_r_bh = self.mass_calculator._black_hole_radius_for_mass(current_m_bh)
-        
+        cached_masses_prev = self._cached_masses
+        if cached_masses_prev:
+            r_apparent_prev = float(
+                cached_masses_prev.get('r_black_hole_schwarzschild_m', 0.0)
+            )
+            if r_apparent_prev > current_r_bh:
+                current_r_bh = r_apparent_prev
+
         self.step_matter_simulation(universe, cosmology, current_r_bh)
         step_wall = time.perf_counter() - t0
         h_cap = sum(
             getattr(s, '_last_capture_ltb_horizons_seconds', 0.0)
             for s in self.matter_simulations.values()
         )
-        step_net = max(0.0, step_wall - h_cap)
+        emission_boundary_sum = sum(
+            getattr(s, '_last_emission_boundary_seconds', 0.0)
+            for s in self.matter_simulations.values()
+        )
+        step_net = max(0.0, step_wall - h_cap - emission_boundary_sum)
         particles_sum = sum(
             s.matter_points._profile_step_particles_s
             for s in self.matter_simulations.values()
@@ -1623,6 +1721,7 @@ class UniverseRenderer:
             0.0, step_net - particles_sum - photons_sum
         )
         profile_times['ltb_horizons_capture'] = h_cap
+        profile_times['ltb_emission_boundary'] = emission_boundary_sum
 
         # ВАЖНО: Вычисляем массы ОДИН РАЗ за кадр и кэшируем результат
         # Это критично для производительности, так как calculate_masses очень тяжелый
@@ -1677,12 +1776,6 @@ class UniverseRenderer:
             try:
                 print("\n" + "="*60)
                 print("PERFORMANCE PROFILING (time in milliseconds):")
-                print(
-                    "  Шаг: step_matter_particles + step_laser_in_flight + "
-                    "step_matter_other + ltb_horizons_capture = весь step. "
-                    "Массы: masses_points_prep + masses_photons_prep + "
-                    "ltb_horizons_masses = calculate_masses."
-                )
                 print("="*60)
                 # Сортируем по времени выполнения
                 sorted_times = sorted(profile_times.items(), key=lambda x: x[1], reverse=True)
@@ -1695,9 +1788,6 @@ class UniverseRenderer:
                 # Fallback для консолей без поддержки Unicode
                 print("\n" + "="*60)
                 print("PERFORMANCE PROFILING:")
-                print(
-                    "  step_* + masses_* lines partition one full step / calculate_masses call."
-                )
                 print("="*60)
                 sorted_times = sorted(profile_times.items(), key=lambda x: x[1], reverse=True)
                 for method, elapsed in sorted_times:
@@ -1747,8 +1837,10 @@ class UniverseRenderer:
 
         Когда r_head ≥ r_tail, луч полностью поглощён ЦЧД.
 
-        Цвет фотона: factor = a_emit/a_now — синий (свежий) → через зелёный → красный
-        (сильнее покрасневший при меньшем factor).
+        Цвет маркера: factor = a_emit/a_now (космологически).
+        Если MATTER_LASER_PHOTON_DRAW_MIN_REMAINING_FRACTION > 0, пакеты с
+        долей энергии ниже этого порога не отрисовываются (см. config). Цвет надписи
+        «Photon m:» на панели — отдельно: там factor ограничен снизу порогом.
         """
         mp = getattr(self.matter_simulation, 'matter_points', None)
         if mp is None or mp.points_comoving is None or len(mp.points_comoving) == 0:
@@ -1781,6 +1873,22 @@ class UniverseRenderer:
             r_black_hole = float(masses_cached.get('r_black_hole_schwarzschild_m', 0.0))
 
         visible = np.isfinite(r_photon) & (r_photon > max(r_black_hole, 0.0))
+
+        min_frac_cut = float(
+            getattr(config, 'MATTER_LASER_PHOTON_DRAW_MIN_REMAINING_FRACTION', 0.0)
+        )
+        if min_frac_cut > 0.0:
+            a_emit_early = getattr(mp, '_laser_photon_a_emit', None)
+            if a_emit_early is not None and len(a_emit_early) == chi.shape[0]:
+                a_em = np.asarray(a_emit_early, dtype=np.float64)
+                frac_remaining = a_em / max(float(scale_factor), 1e-300)
+                visible &= frac_remaining >= min_frac_cut
+
+        if not getattr(self, "show_laser_photons_outside_ds_ref", True):
+            r_ds = float(str(cosmology.de_sitter_horizon(0.0)))
+            if np.isfinite(r_ds) and r_ds > 0.0 and r_ds < float("inf"):
+                visible &= r_photon <= r_ds
+
         if not np.any(visible):
             return
 
@@ -1829,10 +1937,8 @@ class UniverseRenderer:
         a_now = float(scale_factor)
         
         z_cosmo_factor = a_emit_on / max(a_now, 1e-300)
-        
-        total_factor = z_cosmo_factor
 
-        colors = np.clip(photon_rgb_blue_green_red(total_factor), 0, 255).astype(np.uint8)
+        colors = np.clip(photon_rgb_blue_green_red(z_cosmo_factor), 0, 255).astype(np.uint8)
         xi = np.clip(np.floor(x[on_screen]), 0, self.width - 1).astype(np.int32)
         yi = np.clip(np.floor(y[on_screen]), 0, self.height - 1).astype(np.int32)
 

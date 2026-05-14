@@ -13,6 +13,7 @@ try:
 except ModuleNotFoundError:
     from scripts import _bootstrap  # noqa: F401  -- from scripts.<name> import ...
 
+import config
 from utils.constants import (
     H0_s,
     OMEGA_B,
@@ -28,10 +29,9 @@ from utils.cosmology_utils import calculate_scale_factor_at_time
 # =============================================================================
 PRECOMPUTE_DT_YEARS = 1e6  # 1 миллион лет
 PRECOMPUTE_TIME_START_YEARS = PRECOMPUTE_DT_YEARS
-PRECOMPUTE_TIME_END_YEARS = 150e9
 
 _TIME_START_YEARS = PRECOMPUTE_TIME_START_YEARS
-_TIME_END_YEARS = PRECOMPUTE_TIME_END_YEARS
+_TIME_END_YEARS = float(config.MAX_TIME_YEARS)
 
 # Вычисляем количество точек для сетки предвычисления горизонтов.
 # Количество точек рассчитывается из желаемого шага симуляции (PRECOMPUTE_DT_YEARS).
@@ -53,8 +53,10 @@ _QUAD_LIMIT = 500
 _QUAD_EPSABS = 1e-6
 _QUAD_EPSREL = 1e-4
 
-# Время в будущем для интегрирования горизонта событий (1000 млрд лет)
-_EVENT_HORIZON_FUTURE_INTEGRATION_TIME_SECONDS = 1000.0 * 1e9 * SECONDS_PER_YEAR
+# Время в будущем для интегрирования справочного FLRW горизонта событий
+_EVENT_HORIZON_FUTURE_INTEGRATION_TIME_SECONDS = (
+    float(config.MAX_TIME_YEARS) * SECONDS_PER_YEAR
+)
 
 def compute_particle_horizon(time_years, scale_factor, previous_integral=None, previous_time=None):
     """

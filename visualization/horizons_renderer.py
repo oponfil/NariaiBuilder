@@ -11,7 +11,95 @@ from utils.config_utils import get_one_billion_ly, get_ten_billion_ly, is_comovi
 
 class HorizonsRenderer:
     """Класс для отрисовки космологических горизонтов"""
-    
+
+    @staticmethod
+    def _blit_horizon_labels_top(renderer, name_surf, value_surf, cx, cy, r_px, dx=0):
+        """Имя и число над верхней точкой круга; dx — сдвиг по X (см. ui.HORIZON_*_OFFSET_Y)."""
+        margin = 4
+        nh = name_surf.get_height()
+        nw = name_surf.get_width()
+        vh = value_surf.get_height()
+        vw = value_surf.get_width()
+        name_y = cy - r_px - margin - nh - vh
+        value_y = name_y + nh
+        name_x = cx - nw // 2 + dx
+        value_x = cx - vw // 2 + dx
+        w, h = renderer.width, renderer.height
+        if (
+            0 <= name_x
+            and name_x + nw <= w
+            and 0 <= name_y
+            and value_y + vh <= h
+        ):
+            renderer.screen.blit(name_surf, (name_x, name_y))
+            renderer.screen.blit(value_surf, (value_x, value_y))
+
+    @staticmethod
+    def _blit_horizon_labels_bottom(renderer, name_surf, value_surf, cx, cy, r_px, dx=0):
+        """Имя и число под нижней точкой круга (6 ч); dx — сдвиг по X (см. ui.HORIZON_*_OFFSET_Y)."""
+        margin = 4
+        nh = name_surf.get_height()
+        nw = name_surf.get_width()
+        vh = value_surf.get_height()
+        vw = value_surf.get_width()
+        name_y = cy + r_px + margin
+        value_y = name_y + nh
+        name_x = cx - nw // 2 + dx
+        value_x = cx - vw // 2 + dx
+        w, h = renderer.width, renderer.height
+        if (
+            0 <= name_x
+            and name_x + nw <= w
+            and 0 <= name_y
+            and value_y + vh <= h
+        ):
+            renderer.screen.blit(name_surf, (name_x, name_y))
+            renderer.screen.blit(value_surf, (value_x, value_y))
+
+    @staticmethod
+    def _blit_horizon_labels_left(renderer, name_surf, value_surf, cx, cy, r_px, dy=0):
+        """Слева (9 ч); dy — сдвиг по Y (+ вниз)."""
+        margin = 4
+        nh = name_surf.get_height()
+        nw = name_surf.get_width()
+        vh = value_surf.get_height()
+        vw = value_surf.get_width()
+        name_y = cy - (nh + vh) // 2 + dy
+        value_y = name_y + nh
+        name_x = cx - r_px - margin - nw
+        value_x = cx - r_px - margin - vw
+        w, h = renderer.width, renderer.height
+        if (
+            0 <= name_x
+            and name_x + nw <= w
+            and 0 <= name_y
+            and value_y + vh <= h
+        ):
+            renderer.screen.blit(name_surf, (name_x, name_y))
+            renderer.screen.blit(value_surf, (value_x, value_y))
+
+    @staticmethod
+    def _blit_horizon_labels_right(renderer, name_surf, value_surf, cx, cy, r_px, dy=0):
+        """Справа (3 ч); dy — сдвиг по Y (+ вниз)."""
+        margin = 4
+        nh = name_surf.get_height()
+        nw = name_surf.get_width()
+        vh = value_surf.get_height()
+        vw = value_surf.get_width()
+        name_y = cy - (nh + vh) // 2 + dy
+        value_y = name_y + nh
+        name_x = cx + r_px + margin
+        value_x = cx + r_px + margin
+        w, h = renderer.width, renderer.height
+        if (
+            0 <= name_x
+            and name_x + nw <= w
+            and 0 <= name_y
+            and value_y + vh <= h
+        ):
+            renderer.screen.blit(name_surf, (name_x, name_y))
+            renderer.screen.blit(value_surf, (value_x, value_y))
+
     def __init__(self, renderer):
         """
         Args:
@@ -94,13 +182,30 @@ class HorizonsRenderer:
                 return radius_int
             
             # Рисуем горизонты (в порядке от меньшего к большему)
-            self._draw_horizon(center_x, center_y, hubble_r, scale_radius, 
-                             ui.HORIZON_HUBBLE_COLOR, ui.HORIZON_HUBBLE_LABEL, 
-                             ui.HORIZON_HUBBLE_OFFSET_Y, cosmology=cosmology)
+            self._draw_horizon(
+                center_x,
+                center_y,
+                hubble_r,
+                scale_radius,
+                ui.HORIZON_HUBBLE_COLOR,
+                ui.HORIZON_HUBBLE_LABEL,
+                ui.HORIZON_HUBBLE_OFFSET_Y,
+                cosmology=cosmology,
+                label_anchor='bottom',
+            )
             
-            self._draw_horizon(center_x, center_y, de_sitter_r, scale_radius,
-                             ui.HORIZON_DE_SITTER_COLOR, ui.HORIZON_DE_SITTER_LABEL,
-                             ui.HORIZON_DE_SITTER_OFFSET_Y, cosmology=cosmology, is_dashed=True)
+            self._draw_horizon(
+                center_x,
+                center_y,
+                de_sitter_r,
+                scale_radius,
+                ui.HORIZON_DE_SITTER_COLOR,
+                ui.HORIZON_DE_SITTER_LABEL,
+                ui.HORIZON_DE_SITTER_OFFSET_Y,
+                cosmology=cosmology,
+                is_dashed=True,
+                label_anchor='left',
+            )
             
             self._draw_horizon(center_x, center_y, event_r, scale_radius,
                              ui.HORIZON_EVENT_COLOR, ui.HORIZON_EVENT_LABEL,
@@ -119,8 +224,23 @@ class HorizonsRenderer:
         except (ValueError, TypeError) as e:
             pass
     
-    def _draw_horizon(self, center_x, center_y, radius_physical, scale_func, color, label, offset_y, cosmology=None, is_dashed=False):
-        """Отрисовать один космологический горизонт"""
+    def _draw_horizon(
+        self,
+        center_x,
+        center_y,
+        radius_physical,
+        scale_func,
+        color,
+        label,
+        offset_y,
+        cosmology=None,
+        is_dashed=False,
+        label_anchor='top',
+    ):
+        """Отрисовать один космологический горизонт.
+        offset_y при label_anchor top/bottom — сдвиг по X; при left/right — по Y (+ вниз).
+        label_anchor: 'top' | 'bottom' | 'left' | 'right'.
+        """
         renderer = self.renderer
         
         if radius_physical < float('inf') and radius_physical > 0:
@@ -168,18 +288,27 @@ class HorizonsRenderer:
                         )
                 
                 # Название и радиус
-                label_x = center_x_int + radius_int + 5
-                label_y = center_y_int + offset_y
-                if 0 < label_x < renderer.width - 100 and 0 < label_y < renderer.height:
-                    text = renderer.small_font.render(label, True, color)
-                    renderer.screen.blit(text, (label_x, label_y))
-                    
-                    display_radius = self._physical_to_display(radius_physical, cosmology)
-                    radius_text = f"{display_radius / 9.461e24:.2f}"
-                    radius_label = renderer.small_font.render(radius_text, True, color)
-                    radius_y = label_y + 18
-                    if 0 < label_x < renderer.width - 100 and 0 < radius_y < renderer.height:
-                        renderer.screen.blit(radius_label, (label_x, radius_y))
+                text = renderer.small_font.render(label, True, color)
+                display_radius = self._physical_to_display(radius_physical, cosmology)
+                radius_text = f"{display_radius / 9.461e24:.2f}"
+                radius_label = renderer.small_font.render(radius_text, True, color)
+                if label_anchor == 'bottom':
+                    blit = self._blit_horizon_labels_bottom
+                elif label_anchor == 'left':
+                    blit = self._blit_horizon_labels_left
+                elif label_anchor == 'right':
+                    blit = self._blit_horizon_labels_right
+                else:
+                    blit = self._blit_horizon_labels_top
+                blit(
+                    renderer,
+                    text,
+                    radius_label,
+                    center_x_int,
+                    center_y_int,
+                    radius_int,
+                    offset_y,
+                )
 
     def _physical_to_display(self, physical_radius: float, cosmology=None) -> float:
         """Перевод физического радиуса в радиус отображения (комовинг в режиме "comoving")."""
@@ -226,17 +355,18 @@ class HorizonsRenderer:
                     )
                 
                 # Название и радиус
-                label_x = center_x_int + radius_int + 5
-                label_y = center_y_int + ui.HORIZON_PARTICLE_OFFSET_Y
-                if 0 < label_x < renderer.width - 100 and 0 < label_y < renderer.height:
-                    text = renderer.small_font.render(ui.HORIZON_PARTICLE_LABEL, True, ui.HORIZON_PARTICLE_COLOR)
-                    renderer.screen.blit(text, (label_x, label_y))
-                    
-                    radius_text = f"{self._physical_to_display(particle_r, cosmology) / 9.461e24:.2f}"
-                    radius_label = renderer.small_font.render(radius_text, True, ui.HORIZON_PARTICLE_COLOR)
-                    radius_y = label_y + 18
-                    if 0 < label_x < renderer.width - 100 and 0 < radius_y < renderer.height:
-                        renderer.screen.blit(radius_label, (label_x, radius_y))
+                text = renderer.small_font.render(ui.HORIZON_PARTICLE_LABEL, True, ui.HORIZON_PARTICLE_COLOR)
+                radius_text = f"{self._physical_to_display(particle_r, cosmology) / 9.461e24:.2f}"
+                radius_label = renderer.small_font.render(radius_text, True, ui.HORIZON_PARTICLE_COLOR)
+                self._blit_horizon_labels_bottom(
+                    renderer,
+                    text,
+                    radius_label,
+                    center_x_int,
+                    center_y_int,
+                    radius_int,
+                    ui.HORIZON_PARTICLE_OFFSET_Y,
+                )
     
     def _draw_black_hole_horizon(self, center_x, center_y, r_black_hole, scale_func, mass_kg, cosmology=None):
         """Отрисовать горизонт событий центральной черной дыры"""
@@ -272,14 +402,15 @@ class HorizonsRenderer:
                     )
                 
                 # Название и радиус
-                label_x = center_x_int + radius_int + 5
-                label_y = center_y_int + ui.HORIZON_BLACK_HOLE_OFFSET_Y
-                if 0 < label_x < renderer.width - 100 and 0 < label_y < renderer.height:
-                    text = renderer.small_font.render(ui.HORIZON_BLACK_HOLE_LABEL, True, black_hole_color)
-                    renderer.screen.blit(text, (label_x, label_y))
-                    
-                    radius_text = f"{self._physical_to_display(r_black_hole, cosmology) / get_one_billion_ly():.2f}"
-                    radius_label = renderer.small_font.render(radius_text, True, black_hole_color)
-                    radius_y = label_y + 18
-                    if 0 < label_x < renderer.width - 100 and 0 < radius_y < renderer.height:
-                        renderer.screen.blit(radius_label, (label_x, radius_y))
+                text = renderer.small_font.render(ui.HORIZON_BLACK_HOLE_LABEL, True, black_hole_color)
+                radius_text = f"{self._physical_to_display(r_black_hole, cosmology) / get_one_billion_ly():.2f}"
+                radius_label = renderer.small_font.render(radius_text, True, black_hole_color)
+                self._blit_horizon_labels_top(
+                    renderer,
+                    text,
+                    radius_label,
+                    center_x_int,
+                    center_y_int,
+                    radius_int,
+                    ui.HORIZON_BLACK_HOLE_OFFSET_Y,
+                )

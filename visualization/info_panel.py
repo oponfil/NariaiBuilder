@@ -29,7 +29,12 @@ class InfoPanel:
         """
         self.renderer = renderer
         self._max_laser_emitters_power_w = 0.0
-    
+        self._photon_mass_hud_last: tuple[str, tuple[int, int, int]] | None = None
+
+    def reset_photon_mass_label_hold(self) -> None:
+        """Сброс удерживаемой подписи массы фотона (renderer.reset)."""
+        self._photon_mass_hud_last = None
+
     def draw_info(self, universe, cosmology, fps: float, masses=None):
         """Отрисовать информацию о симуляции"""
         renderer = self.renderer
@@ -73,29 +78,31 @@ class InfoPanel:
             percent_dark_energy = 0.0
             
         v_line, m_line = self._format_point_kinematics_lines(scale_factor)
-        photon_mass_line = self._format_single_photon_mass_line(scale_factor)
+        photon_mass_line, photon_mass_color = (
+            self._format_single_photon_mass_line_with_color(scale_factor)
+        )
         peak_laser_line = self._format_laser_peak_power_line(scale_factor, masses)
         all_photons_line = self._format_all_in_flight_photons_line(scale_factor)
         
         # Остальная информация (сверху)
         # Не показываем FPS во время паузы (чтобы не обновлялся)
         fps_line = "" if renderer.paused else f"FPS: {fps:.1f}"
-        info_lines = [
-            fps_line,
-            f"Time: {time_billion_years:.2f} billion years",
-            f"Scale factor a: {scale_factor:.4f}",
-            f"Redshift z: {redshift:.4f}",
-            f"CMB Temperature: {cmb_temperature:.3f} K",
-            f"H(t): {cosmology.hubble_parameter(universe.time) * 3.086e19:.2f} km/s/Mpc",
-            "",
-            f"Matter: {percent_matter:.3f}%",
-            f"Dark Energy: {percent_dark_energy:.3f}%",
-            "",
-            v_line,
-            m_line,
-            photon_mass_line,
-            peak_laser_line,
-            all_photons_line,
+        info_rows: list[tuple[str, tuple[int, int, int] | None]] = [
+            (fps_line, None),
+            (f"Time: {time_billion_years:.2f} billion years", None),
+            (f"Scale factor a: {scale_factor:.4f}", None),
+            (f"Redshift z: {redshift:.4f}", None),
+            (f"CMB Temperature: {cmb_temperature:.3f} K", None),
+            (f"H(t): {cosmology.hubble_parameter(universe.time) * 3.086e19:.2f} km/s/Mpc", None),
+            ("", None),
+            (f"Matter: {percent_matter:.3f}%", None),
+            (f"Dark Energy: {percent_dark_energy:.3f}%", None),
+            ("", None),
+            (v_line, None),
+            (m_line, None),
+            (photon_mass_line, photon_mass_color),
+            (peak_laser_line, None),
+            (all_photons_line, None),
         ]
         
         # Отрисовка интерактивных кнопок вверху по центру
@@ -186,24 +193,80 @@ class InfoPanel:
         renderer.screen.blit(phys_text, phys_rect)
         renderer.screen.blit(comov_text, comov_rect)
         
-        # Сохраняем области кнопок для обработки кликов
         renderer.ui_rects = {
             "play": play_rect,
             "reset": reset_rect,
             "mode": mode_rect,
-            "dist": dist_rect
+            "dist": dist_rect,
         }
-        
+
         y_offset = 10
-        for line in info_lines:
+        for line, color_override in info_rows:
             if line:
-                text = renderer.small_font.render(line, True, ui.INFO_TEXT_COLOR)
+                line_color = (
+                    color_override if color_override is not None else ui.INFO_TEXT_COLOR
+                )
+                text = renderer.small_font.render(line, True, line_color)
                 renderer.screen.blit(text, (10, y_offset))
             y_offset += 20
-        
-        # Сохраняем позицию для размещения чекбокса
-        renderer.info_text_end_y = 10 + 2 * 20  # 2 строки от верха = 50 пикселей
-        
+
+        renderer.info_text_end_y = y_offset + 6
+
+        # Чекбокс (правый верх): вкл — показывать фотоны за r_dS; выкл — обрезка по пунктиру.
+        sq = 16
+        gap = 8
+        show_ds = getattr(renderer, "show_laser_photons_outside_ds_ref", True)
+        label_ds = renderer.small_font.render(
+            "Фотоны за горизонтом de Sitter",
+            True,
+            ui.INFO_TEXT_COLOR,
+        )
+        label_w = int(label_ds.get_width())
+        label_h = int(label_ds.get_height())
+        cb_y = ui.BUTTON_Y + (ui.BUTTON_HEIGHT - sq) // 2
+        marg = ui.BUTTON_MARGIN
+        cb_x = int(renderer.width) - marg - sq
+        label_x = cb_x - gap - label_w
+        label_y = cb_y + (sq - label_h) // 2
+
+        pad_i = 6
+        ds_hit_w = pad_i + label_w + gap + sq + pad_i
+        ds_hit_x = label_x - pad_i
+        if ds_hit_x < 2:
+            ds_hit_x = 2
+        ds_hit = pygame.Rect(
+            ds_hit_x,
+            cb_y - 4,
+            ds_hit_w,
+            max(label_h, sq) + 8,
+        )
+        hovered = ds_hit.collidepoint(mouse_pos)
+
+        cb_rect = pygame.Rect(cb_x, cb_y, sq, sq)
+        bg_cb = (90, 140, 220) if show_ds else (42, 42, 58)
+        if hovered:
+            bg_cb = tuple(min(255, c + 40) for c in bg_cb)
+        pygame.draw.rect(renderer.screen, bg_cb, cb_rect, border_radius=3)
+        pygame.draw.rect(renderer.screen, (210, 210, 235), cb_rect, 1, border_radius=3)
+        if show_ds:
+            pygame.draw.line(
+                renderer.screen,
+                (255, 255, 255),
+                (cb_x + 3, cb_y + 8),
+                (cb_x + 6, cb_y + 11),
+                2,
+            )
+            pygame.draw.line(
+                renderer.screen,
+                (255, 255, 255),
+                (cb_x + 6, cb_y + 11),
+                (cb_x + 13, cb_y + 4),
+                2,
+            )
+        renderer.screen.blit(label_ds, (label_x, label_y))
+
+        renderer.ui_rects["photons_outside_ds"] = ds_hit
+
         # Панель с массами внизу слева
         self._draw_mass_panel(renderer, universe, cosmology, masses)
     
@@ -334,22 +397,23 @@ class InfoPanel:
             f"Point m: {m_eff:.2e} kg{self._m_point_pct_of_initial_suffix(m_rest)}",
         )
 
-    def _format_single_photon_mass_line(self, scale_factor: float) -> str:
-        """Масса-эквивалент первого пакета с самой дальней лазерной точки (мин. a_emit у источника)."""
+    def _format_single_photon_mass_line_with_color(
+        self, scale_factor: float
+    ) -> tuple[str, tuple[int, int, int]]:
+        """Масса-эквивалент пакета с мин. a_emit; цвет как у маркера (a_emit/a_now)."""
         renderer = self.renderer
         try:
             mp = renderer.matter_points
             photon_masses = getattr(mp, '_laser_photon_mass_emit_kg', None)
             photon_a_emit = getattr(mp, '_laser_photon_a_emit', None)
             photon_r_emit = getattr(mp, '_laser_photon_r_emit_m', None)
-            photon_src = getattr(mp, '_laser_photon_source_idx', None)
         except AttributeError:
             photon_masses = None
             photon_a_emit = None
             photon_r_emit = None
-            photon_src = None
 
         picked = False
+        a_emit_picked = 0.0
         if (
             photon_masses is not None
             and photon_a_emit is not None
@@ -370,6 +434,7 @@ class InfoPanel:
             idx = int(np.argmin(a_all))
             m_emit = float(m_all[idx])
             a_emit = float(a_all[idx])
+            a_emit_picked = a_emit
             a_eff = float(scale_factor)
             r_emit = float(r_emit_all[idx])
             
@@ -380,15 +445,49 @@ class InfoPanel:
             picked = True
 
         if not picked:
-            # Лазер выключен или фотоны еще не долетели/уже упали.
-            # Не рисуем фантомные значения, если сжигаемая масса исчерпана.
             m_photon = 0.0
             m_emit = 0.0
 
-        pct_of_emit = 100.0 * m_photon / m_emit if m_emit > 0.0 else 0.0
-        if m_photon == 0.0:
-            return "Photon m: 0.00e+00 kg (0.00%)"
-        return f"Photon m: {m_photon:.2e} kg ({pct_of_emit:.2f}%)"
+        min_f_cfg = float(
+            getattr(config, 'MATTER_LASER_PHOTON_DRAW_MIN_REMAINING_FRACTION', 0.0)
+        )
+        neutral = ui.INFO_TEXT_COLOR
+
+        if not picked:
+            if self._photon_mass_hud_last is not None:
+                return self._photon_mass_hud_last
+            return ("Photon m: 0.00e+00 kg (0.00%)", neutral)
+
+        # Пол надписи по min_f: только космологическая доля × m_emit (без √f), чтобы
+        # при min_f=0.1 скобки давали ~10%, а не 100×min_f×√f.
+        m_min_disp = float(m_emit) * min_f_cfg if min_f_cfg > 0.0 else 0.0
+        m_show = max(float(m_photon), m_min_disp)
+        pct_of_emit = (
+            100.0 * m_show / float(m_emit) if float(m_emit) > 0.0 else 0.0
+        )
+
+        if m_show <= 0.0:
+            if self._photon_mass_hud_last is not None:
+                return self._photon_mass_hud_last
+            return ("Photon m: 0.00e+00 kg (0.00%)", neutral)
+
+        # Для надписи: множитель a_emit/a_now не «краснеет» сильнее уровня порога (точки
+        # с долей ниже порога не рисуются в draw_photons).
+        from visualization.renderer import photon_rgb_blue_green_red
+
+        cosmo_factor = float(a_emit_picked) / max(float(scale_factor), 1e-300)
+        if min_f_cfg > 0.0:
+            cosmo_factor = max(cosmo_factor, min_f_cfg)
+        rgb = photon_rgb_blue_green_red(np.asarray([cosmo_factor], dtype=np.float64))[0]
+        rgb_i = (
+            int(np.clip(rgb[0], 0.0, 255.0)),
+            int(np.clip(rgb[1], 0.0, 255.0)),
+            int(np.clip(rgb[2], 0.0, 255.0)),
+        )
+        line = f"Photon m: {m_show:.2e} kg ({pct_of_emit:.2f}%)"
+        out = (line, rgb_i)
+        self._photon_mass_hud_last = out
+        return out
 
     def _format_laser_peak_power_line(
         self, scale_factor: float, masses: dict | None
@@ -542,7 +641,7 @@ class InfoPanel:
             (central_bh_mass_str, black_hole_color),
             (f"  Growth speed: {bh_growth_velocity_formatted}", black_hole_color),
         ] + bh_diag_lines + [
-            (f"LTB Hubble horizon: {format_mass_kg(masses['M_hubble_horizon_kg'])}", ui.HORIZON_HUBBLE_COLOR),
+            (f"Hubble horizon: {format_mass_kg(masses['M_hubble_horizon_kg'])}", ui.HORIZON_HUBBLE_COLOR),
             (f"Event horizon: {format_mass_kg(masses['M_event_horizon_kg'])}", ui.HORIZON_EVENT_COLOR),
             (f"de Sitter horizon: {format_mass_kg(masses['M_de_sitter_horizon_kg'])}", ui.HORIZON_DE_SITTER_COLOR),
         ] + ds_diag_lines + particle_horizon_lines + chi_sum_line

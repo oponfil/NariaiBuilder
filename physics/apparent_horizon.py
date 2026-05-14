@@ -41,10 +41,34 @@ from typing import Optional
 import numpy as np
 from scipy import integrate
 
-from utils.constants import G, H0_s, OMEGA_B, OMEGA_DM, OMEGA_LAMBDA, c as _C_LIGHT
+import config
+from utils.constants import (
+    CAUSAL_HORIZON_COMOVING_METERS,
+    G,
+    SECONDS_PER_YEAR,
+    c as _C_LIGHT,
+)
 
+_LTB_EVENT_SOLVE_RTOL = 1e-2
+_LTB_EVENT_SOLVE_ATOL_REL = 1e-6
+_LTB_EVENT_SOLVE_ATOL_MIN_M = 1e9
+_LTB_EVENT_SOLVE_MAX_STEP_DIVISOR = 16.0
+_LTB_EVENT_INITIAL_OUTER_FRACTION = 1.0 - 1.0e-5
 
-_LTB_EVENT_FUTURE_YEARS = 100.0e9
+_APPARENT_HORIZON_SCAN_EPS_REL = 1e-9
+_APPARENT_HORIZON_SCAN_EPS_MIN_M = 1.0
+_APPARENT_HORIZON_INNER_CLASSICAL_EPS_REL = 1e-3
+
+_APPARENT_HORIZON_MIN_G_GOLDEN_ITERATIONS = 48
+_APPARENT_HORIZON_MIN_G_REL_TOL = 1e-8
+
+_APPARENT_HORIZON_INNER_SCAN_POINTS = 48
+_APPARENT_HORIZON_INNER_BISECT_ITERATIONS = 32
+_APPARENT_HORIZON_INNER_REL_TOL = 1e-7
+
+_APPARENT_HORIZON_OUTER_SCAN_POINTS = 128
+_APPARENT_HORIZON_OUTER_BISECT_ITERATIONS = 48
+_APPARENT_HORIZON_OUTER_REL_TOL = 1e-9
 
 
 def build_active_matter_state(
@@ -102,11 +126,21 @@ def build_active_matter_state(
     # γ·m_rest: используем предрассчитанный _v_sq_comoving, если он совпадает
     # по длине с cd. Иначе — без коррекции (при отсутствии релятивистских
     # скоростей это даёт точную m_rest).
+    # ВАЖНО: β² = v_sq · a_stored² / c², где a_stored — это a(t) на момент
+    # последнего обновления velocities_comoving, а НЕ текущий scale_factor.
+    # Между update_positions и следующим вызовом cosmology.scale_factor
+    # успевает уйти вперёд; если использовать его, β² для самой быстрой
+    # точки переезжает через 1, clip → γ=10⁶ и одна точка раздувает M(<r)
+    # на 10⁶·m_rest, что сдвигает корни g(r)=0 и даёт нефизичный прыжок
+    # apparent horizon. См. _recompute_velocity_norms.
     v_sq_full = matter_points._v_sq_comoving
+    a_for_gamma = getattr(matter_points, '_velocities_scale_factor', None)
+    if a_for_gamma is None or float(a_for_gamma) <= 0.0:
+        a_for_gamma = float(scale_factor)
     if (v_sq_full is not None
             and len(v_sq_full) == n_total
-            and float(scale_factor) > 0.0):
-        sf2_over_c2 = (float(scale_factor) ** 2) / (_C_LIGHT * _C_LIGHT)
+            and float(a_for_gamma) > 0.0):
+        sf2_over_c2 = (float(a_for_gamma) ** 2) / (_C_LIGHT * _C_LIGHT)
         beta2_a = v_sq_full[active_indices] * sf2_over_c2
         np.clip(beta2_a, 0.0, 1.0 - 1e-12, out=beta2_a)
         gamma_a = 1.0 / np.sqrt(1.0 - beta2_a)
@@ -129,24 +163,51 @@ def matter_mass_inside_phys(
     matter_state: Optional[dict],
     scale_factor: float,
 ) -> float:
-    """Сумма γ·m_rest активных точек внутри физического радиуса r_phys."""
+    """Сглаженная сумма γ·m_rest активной пыли внутри r_phys.
+
+    Точки материи в симуляции — это макро-частицы, представляющие
+    непрерывную пыль. Для горизонтов нельзя трактовать каждую такую точку как
+    бесконечно тонкую сферическую оболочку: при малом MATTER_NUM_POINTS это
+    создаёт ступени M(<r) и скачки корней g(r)=0. Поэтому интерполируем
+    кумулятивную массу по сопутствующему объёму chi^3.
+    """
     if matter_state is None or scale_factor <= 0.0 or r_phys <= 0.0:
         return 0.0
     d_sorted = matter_state.get('d_sorted_comoving')
     cum_mass = matter_state.get('cum_mass_sorted')
     if d_sorted is None or cum_mass is None or d_sorted.size == 0:
         return 0.0
-    idx = int(np.searchsorted(d_sorted, r_phys / scale_factor, side='right'))
-    if idx <= 0:
+    x_nodes = np.asarray(d_sorted, dtype=np.float64) ** 3
+    y_nodes = np.asarray(cum_mass, dtype=np.float64)
+    shell_mass = np.diff(np.concatenate(([0.0], y_nodes)))
+    y_nodes = y_nodes - 0.5 * shell_mass
+    valid = np.isfinite(x_nodes) & np.isfinite(y_nodes) & (x_nodes > 0.0)
+    if not np.any(valid):
         return 0.0
-    return float(cum_mass[idx - 1])
+    x_nodes = x_nodes[valid]
+    y_nodes = y_nodes[valid]
+    # np.interp expects strictly increasing x. Exact duplicate radii are rare,
+    # but possible after generated/added points; keep the last cumulative mass.
+    keep_last = np.concatenate((np.diff(x_nodes) > 0.0, [True]))
+    x_nodes = x_nodes[keep_last]
+    y_nodes = y_nodes[keep_last]
+    x = (float(r_phys) / float(scale_factor)) ** 3
+    return float(np.interp(x, x_nodes, y_nodes, left=0.0, right=float(y_nodes[-1])))
 
 
 def laser_mass_inside_phys(
     r_phys: float,
     laser_state,
 ) -> float:
-    """E/c² фотонов лазера в полёте внутри физического радиуса r_phys.
+    """Сглаженная сумма E/c² лазерных фотонов в полёте внутри r_phys.
+
+    Лазерные пакеты — численная аппроксимация непрерывного потока энергии:
+    каждый шаг dt создаёт дискретные «снаряды» вместо непрерывной струи.
+    Если оставить M(<r) ступенчатой, у g(r) = 2GM/(c²r) + Λr²/3 − 1
+    появляются дополнительные нули на радиусах пакетов; решатель apparent
+    horizon перескакивает между ними и космологическая граница нефизически
+    дёргается. Поэтому интерполируем кумулятивную массу как непрерывную
+    функцию r³ — это аналог сглаживания макро-точек материи.
 
     Принимает laser_state в формате `MatterPoints.build_in_flight_laser_mass_state`.
     """
@@ -156,10 +217,22 @@ def laser_mass_inside_phys(
     cum_mass = laser_state.get('cum_mass')
     if r_sorted is None or cum_mass is None or len(r_sorted) == 0:
         return 0.0
-    idx = int(np.searchsorted(r_sorted, r_phys, side='right'))
-    if idx <= 0:
+    x_nodes = np.asarray(r_sorted, dtype=np.float64) ** 3
+    y_nodes = np.asarray(cum_mass, dtype=np.float64)
+    shell_mass = np.diff(np.concatenate(([0.0], y_nodes)))
+    y_nodes = y_nodes - 0.5 * shell_mass
+    valid = np.isfinite(x_nodes) & np.isfinite(y_nodes) & (x_nodes > 0.0)
+    if not np.any(valid):
         return 0.0
-    return float(cum_mass[idx - 1])
+    x_nodes = x_nodes[valid]
+    y_nodes = y_nodes[valid]
+    keep_last = np.concatenate((np.diff(x_nodes) > 0.0, [True]))
+    x_nodes = x_nodes[keep_last]
+    y_nodes = y_nodes[keep_last]
+    return float(np.interp(
+        float(r_phys) ** 3, x_nodes, y_nodes,
+        left=0.0, right=float(y_nodes[-1]),
+    ))
 
 
 def compute_ltb_event_horizon(
@@ -170,6 +243,7 @@ def compute_ltb_event_horizon(
     scale_factor_now: float,
     lambda_const: float,
     r_outer_now: float,
+    a_at_seconds,
 ) -> float:
     """
     LTB event/null horizon from the same M(<r,t) used by apparent horizons.
@@ -183,48 +257,77 @@ def compute_ltb_event_horizon(
 
     This keeps the scenario path LTB-consistent: no FLRW/SdS event-horizon
     helper is mixed into the displayed/dynamical LTB horizons.
+
+    ВНИМАНИЕ — обработка лазера в M(<r,t):
+    Лазерные фотоны в этой симуляции летят ВНУТРЬ, к центральной ЦЧД
+    (см. `MatterPoints._advance_laser_photons_chi`: chi = chi − c·dη), и
+    поглощаются при r_photon ≤ r_BH (масса уходит в `accumulated_bh_mass`).
+    Тем не менее `laser_state` сюда сознательно НЕ заводится в M(<r,t).
+    Причины — три:
+
+    (а) Snapshot `laser_state` хранит ФИЗИЧЕСКИЕ радиусы фотонов на t_now.
+        Решатель `solve_apparent_outer_horizon(..., a_future, ...)`
+        интерпретирует их как СТАТИЧЕСКУЮ массовую оболочку при a_future,
+        что нефизично — за окно интегрирования (config.MAX_TIME_YEARS ≈
+        100 Gyr) каждый фотон уже успел бы попасть в ЦЧД (время полёта
+        r_emit/c ~ Myr–Gyr). Ступенька M(<r) на радиусе r_photon ещё и
+        порождает дополнительные корни g(r)=0, между которыми решатель
+        внешнего AH перепрыгивал от кадра к кадру.
+
+    (б) Сумма E/c² фотонов в snapshot посчитана по их ТЕКУЩЕЙ энергии
+        E(t_now) = E_emit·(a_emit/a_now). За время полёта до центра
+        фотон испытает ещё один cosmological redshift на (a_now/a_absorb),
+        так что в M_BH в итоге уйдёт не Σ E(t_now)/c², а
+        Σ E_emit·(a_emit/a_absorb_i)/c² < Σ E(t_now)/c². Без явного
+        отслеживания траекторий мы НЕ можем точно сказать, сколько массы
+        реально доберётся до ЦЧД, и любое «пред-абсорбирование» в M_bh
+        будет завышенной оценкой.
+
+    (в) Даже если оставить (а) и (б) в стороне и попробовать вариант
+        `M_bh_eff = M_bh_kg + Σ E_photon/c²` (наивный upper bound), в
+        этой симуляции Σ M_laser_in_flight ≈ массе Нараи. Решатель
+        apparent horizon с M_eff ≈ M_N оказывается у точки слияния (где
+        inner и outer совпадают), и крошечные шумы в M_laser (от
+        поглощения/эмиссии отдельных фотонов) приводят к
+        НЕпропорционально большим скачкам стартовой точки
+        backward-интегрирования сепаратрисы. На практике это давало
+        видимые прыжки 20–30% за кадр.
+
+    Поэтому используем самый стабильный путь: считаем event horizon как
+    LTB-«фон» БЕЗ временной массы фотонов в полёте. Реальный (уже с учётом
+    redshift'а) рост M_bh от их поглощения отражается в
+    `accumulated_bh_mass` на следующих кадрах, и кривая горизонта плавно
+    подстраивается. Расхождение с физически точной картиной — нижняя оценка
+    на уровне (реально-поглощённая Σ E/c²) / M_BH(t→∞), которое мало для
+    типичных сценариев и не растёт со временем.
+
+    Args:
+        laser_state: kept in signature для совместимости вызывающих, но
+            игнорируется внутри (см. блок-комментарий выше).
+        a_at_seconds: callable(t_seconds) → a(t). Прод-вызывающие передают
+            ``cosmology._get_scale_factor_for_time``, у которого под капотом
+            интерполяция `data/event_horizon_cache.json` (та же «обычная»
+            ΛCDM-эволюция, что и `calculate_scale_factor_at_time`, только
+            посчитанная один раз скриптом предвычисления). Раньше здесь
+            висел отдельный scipy.solve_ivp(da_dt, ...) на ~70 мс/кадр.
     """
+    del laser_state
     t0 = float(time_now)
     a0 = float(scale_factor_now)
     if t0 <= 0.0 or a0 <= 0.0 or lambda_const <= 0.0:
         return 0.0
 
-    seconds_per_year = 365.25 * 24 * 3600
-    t_future = t0 + _LTB_EVENT_FUTURE_YEARS * seconds_per_year
-    omega_m = OMEGA_DM + OMEGA_B
-
-    def da_dt(_t, a_val):
-        a = max(float(a_val[0]), 1e-30)
-        h = H0_s * np.sqrt(omega_m / (a ** 3) + OMEGA_LAMBDA)
-        return [a * h]
-
-    try:
-        sol_a = integrate.solve_ivp(
-            da_dt,
-            [t0, t_future],
-            [a0],
-            method='RK45',
-            dense_output=True,
-            rtol=1e-4,
-            atol=1e-9,
-            max_step=(t_future - t0) / 256.0,
-        )
-    except Exception:
-        return 0.0
-    if not sol_a.success:
-        return 0.0
+    t_future = t0 + float(config.MAX_TIME_YEARS) * SECONDS_PER_YEAR
 
     def a_at(t_value: float) -> float:
         if t_value <= t0:
             return a0
-        if t_value >= t_future:
-            return max(float(sol_a.y[0, -1]), 1e-30)
-        return max(float(sol_a.sol(t_value)[0]), 1e-30)
+        return max(float(a_at_seconds(t_value)), 1e-30)
 
     a_future = a_at(t_future)
     r_outer_upper = np.sqrt(3.0 / lambda_const) * 1.001
     r_outer_future = solve_apparent_outer_horizon(
-        M_bh_kg, matter_state, laser_state, a_future,
+        M_bh_kg, matter_state, None, a_future,
         0.0, r_outer_upper, lambda_const,
     )
     if not np.isfinite(r_outer_future) or r_outer_future <= 0.0:
@@ -238,22 +341,24 @@ def compute_ltb_event_horizon(
         M = (
             float(M_bh_kg)
             + matter_mass_inside_phys(r, matter_state, a_t)
-            + laser_mass_inside_phys(r, laser_state)
         )
         arg = 2.0 * G * M / r + lambda_const * _C_LIGHT * _C_LIGHT * (r ** 2) / 3.0
         Rdot = np.sqrt(arg) if arg > 0.0 else 0.0
         return [Rdot - _C_LIGHT]
 
-    r_init = float(r_outer_future) * (1.0 - 1.0e-5)
+    r_init = float(r_outer_future) * _LTB_EVENT_INITIAL_OUTER_FRACTION
     try:
         sol_r = integrate.solve_ivp(
             dr_dt,
             [t_future, t0],
             [r_init],
             method='RK45',
-            rtol=1e-4,
-            atol=max(float(r_outer_now) * 1e-7, 1e7),
-            max_step=(t_future - t0) / 256.0,
+            rtol=_LTB_EVENT_SOLVE_RTOL,
+            atol=max(
+                float(r_outer_now) * _LTB_EVENT_SOLVE_ATOL_REL,
+                _LTB_EVENT_SOLVE_ATOL_MIN_M,
+            ),
+            max_step=(t_future - t0) / _LTB_EVENT_SOLVE_MAX_STEP_DIVISOR,
         )
     except Exception:
         return 0.0
@@ -263,6 +368,33 @@ def compute_ltb_event_horizon(
     r_event = float(sol_r.y[0, -1])
     if not np.isfinite(r_event) or r_event <= 0.0:
         return 0.0
+
+    # ── Upper bound: r_event ≤ a(t) · CAUSAL_HORIZON_COMOVING_METERS ──
+    #
+    # Comoving causal horizon = (1/c)·∫_0^∞ c·dt/a(t) — полная сопутствующая
+    # дистанция, до которой свет когда-либо может добраться в этой
+    # ΛCDM-космологии (от Большого взрыва до t→∞). Аналитическая константа
+    # лежит в utils.constants.CAUSAL_HORIZON_COMOVING_METERS = R_λ·∛(Ω_Λ/Ω_m)·I
+    # ≈ 63.69 Gly (см. вывод там).
+    #
+    # Comoving event horizon в любой момент t равен ∫_t^∞ c·dt'/a(t') и по
+    # построению ≤ ∫_0^∞ c·dt'/a(t') = causal comoving. Значит и физический
+    # event horizon обязан удовлетворять
+    #     r_event_phys(t)  ≤  a(t) · CAUSAL_HORIZON_COMOVING_METERS.
+    #
+    # В нашем LTB этот bound может нарушаться численно: вся масса Вселенной
+    # (≈ 2.5e54 кг) сидит в маленьком сгустке, поэтому при backward-интегрировании
+    # сепаратрисы dr/dt = R_dot − c член 2GM(<r)/r внутри R_dS делает R_dot ≫ c,
+    # и null-траектория «убегает» дальше, чем позволяет глобальная FLRW-причинность.
+    # Это артефакт overconcentrated-кластера, а не реальная физика — глобальная
+    # причинная структура задаётся метрикой ВНЕ кластера, которая FLRW-подобна.
+    #
+    # Lower bound (r_event ≥ r_inner_AH) применяется в MassCalculator после
+    # вычисления inner apparent horizon — там есть полный laser_state, который
+    # мы здесь сознательно игнорируем (см. блок-комментарий в начале функции).
+    r_causal_phys = a0 * float(CAUSAL_HORIZON_COMOVING_METERS)
+    if r_event > r_causal_phys:
+        r_event = r_causal_phys
     return r_event
 
 
@@ -326,20 +458,54 @@ def effective_central_mass_array(
         d_sorted = matter_state['d_sorted_comoving']
         cum_mass = matter_state['cum_mass_sorted']
         if d_sorted.size > 0:
-            r_comoving = r / float(scale_factor)
-            idx = np.searchsorted(d_sorted, r_comoving, side='right')
-            has_inside = (idx > 0) & (r > 0.0)
-            if np.any(has_inside):
-                M[has_inside] = M[has_inside] + cum_mass[idx[has_inside] - 1]
+            x_nodes = np.asarray(d_sorted, dtype=np.float64) ** 3
+            y_nodes = np.asarray(cum_mass, dtype=np.float64)
+            shell_mass = np.diff(np.concatenate(([0.0], y_nodes)))
+            y_nodes = y_nodes - 0.5 * shell_mass
+            valid = np.isfinite(x_nodes) & np.isfinite(y_nodes) & (x_nodes > 0.0)
+            if np.any(valid):
+                x_nodes = x_nodes[valid]
+                y_nodes = y_nodes[valid]
+                keep_last = np.concatenate((np.diff(x_nodes) > 0.0, [True]))
+                x_nodes = x_nodes[keep_last]
+                y_nodes = y_nodes[keep_last]
+                r_comoving = r / float(scale_factor)
+                x_query = np.maximum(r_comoving, 0.0) ** 3
+                has_inside = r > 0.0
+                if np.any(has_inside):
+                    M[has_inside] = M[has_inside] + np.interp(
+                        x_query[has_inside],
+                        x_nodes,
+                        y_nodes,
+                        left=0.0,
+                        right=float(y_nodes[-1]),
+                    )
 
     if laser_state is not None:
         r_sorted = laser_state.get('r_sorted')
         cum_mass_l = laser_state.get('cum_mass')
         if r_sorted is not None and cum_mass_l is not None and len(r_sorted) > 0:
-            idx_l = np.searchsorted(r_sorted, r, side='right')
-            has_inside_l = (idx_l > 0) & (r > 0.0)
-            if np.any(has_inside_l):
-                M[has_inside_l] = M[has_inside_l] + cum_mass_l[idx_l - 1][has_inside_l]
+            x_nodes = np.asarray(r_sorted, dtype=np.float64) ** 3
+            y_nodes = np.asarray(cum_mass_l, dtype=np.float64)
+            shell_mass = np.diff(np.concatenate(([0.0], y_nodes)))
+            y_nodes = y_nodes - 0.5 * shell_mass
+            valid = np.isfinite(x_nodes) & np.isfinite(y_nodes) & (x_nodes > 0.0)
+            if np.any(valid):
+                x_nodes = x_nodes[valid]
+                y_nodes = y_nodes[valid]
+                keep_last = np.concatenate((np.diff(x_nodes) > 0.0, [True]))
+                x_nodes = x_nodes[keep_last]
+                y_nodes = y_nodes[keep_last]
+                x_query = np.maximum(r, 0.0) ** 3
+                has_inside_l = r > 0.0
+                if np.any(has_inside_l):
+                    M[has_inside_l] = M[has_inside_l] + np.interp(
+                        x_query[has_inside_l],
+                        x_nodes,
+                        y_nodes,
+                        left=0.0,
+                        right=float(y_nodes[-1]),
+                    )
 
     return M
 
@@ -452,7 +618,7 @@ def _refine_min_g_radius(
     f1 = _g_scalar(c1, M_bh_kg, matter_state, laser_state, scale_factor, lambda_const)
     f2 = _g_scalar(c2, M_bh_kg, matter_state, laser_state, scale_factor, lambda_const)
 
-    for _ in range(64):
+    for _ in range(_APPARENT_HORIZON_MIN_G_GOLDEN_ITERATIONS):
         if f1 <= f2:
             hi = c2
             c2 = c1
@@ -466,7 +632,7 @@ def _refine_min_g_radius(
             c2 = lo + inv_phi * (hi - lo)
             f2 = _g_scalar(c2, M_bh_kg, matter_state, laser_state, scale_factor, lambda_const)
 
-        if hi - lo <= 1e-9 * max(hi, 1.0):
+        if hi - lo <= _APPARENT_HORIZON_MIN_G_REL_TOL * max(hi, 1.0):
             break
 
     return float(0.5 * (lo + hi))
@@ -509,12 +675,27 @@ def solve_apparent_inner_horizon(
     if r_hi <= 0.0:
         return r_classical
 
-    eps = max(r_classical * 1e-3, r_hi * 1e-9, 1.0)
+    # ВАЖНО: eps НЕ должен зависеть от r_hi.
+    # Для outer-горизонта r_hi ~ √(3/Λ) ≈ 1.6e26 м, и шкала `r_hi · 1e-9 ≈
+    # 1.6e17 м` спокойно перепрыгивает через весь физически интересный
+    # внутренний trapped-район (r_classical ~ км для пробных ЦЧД, фотоны
+    # лазера в полёте сидят на r ~ 10⁹–10¹² м). На таком eps скан стартует
+    # за пределами trapped-зоны, `trapped_mask[0] = False`, и функция
+    # отдаёт r_classical, не «видя» накопленных фотонов внутри AH.
+    # Берём чисто r_classical-релятивную шкалу + абсолютный пол: при любой
+    # M_BH > 0 eps окажется глубоко под r_classical и `g(eps) → +∞` даст
+    # trapped_mask[0] = True, после чего скан корректно ищет границу
+    # trapped→untrapped с учётом узлов материи и фотонов из _build_scan_radii.
+    eps = max(
+        r_classical * _APPARENT_HORIZON_INNER_CLASSICAL_EPS_REL,
+        _APPARENT_HORIZON_SCAN_EPS_MIN_M,
+    )
     if eps >= r_hi:
         return r_classical
 
     radii = _build_scan_radii(
-        eps, r_hi, matter_state, laser_state, scale_factor, num_geom=64,
+        eps, r_hi, matter_state, laser_state, scale_factor,
+        num_geom=_APPARENT_HORIZON_INNER_SCAN_POINTS,
     )
     if radii.size == 0:
         return r_classical
@@ -541,7 +722,7 @@ def solve_apparent_inner_horizon(
     lo = float(radii[first_untrapped - 1])
     hi = float(radii[first_untrapped])
 
-    for _ in range(48):
+    for _ in range(_APPARENT_HORIZON_INNER_BISECT_ITERATIONS):
         mid = 0.5 * (lo + hi)
         if _g_scalar(
             mid, M_bh_kg, matter_state, laser_state, scale_factor, lambda_const,
@@ -549,7 +730,7 @@ def solve_apparent_inner_horizon(
             lo = mid
         else:
             hi = mid
-        if hi - lo <= 1e-9 * max(lo, 1.0):
+        if hi - lo <= _APPARENT_HORIZON_INNER_REL_TOL * max(lo, 1.0):
             break
 
     return max(lo, r_classical)
@@ -589,12 +770,17 @@ def solve_apparent_outer_horizon(
     if r_hi <= r_lo:
         return r_hi if r_hi > 0.0 else r_lo
 
-    eps = max(r_lo, r_hi * 1e-9, 1.0)
+    eps = max(
+        r_lo,
+        r_hi * _APPARENT_HORIZON_SCAN_EPS_REL,
+        _APPARENT_HORIZON_SCAN_EPS_MIN_M,
+    )
     if eps >= r_hi:
         return r_hi
 
     radii = _build_scan_radii(
-        eps, r_hi, matter_state, laser_state, scale_factor, num_geom=128,
+        eps, r_hi, matter_state, laser_state, scale_factor,
+        num_geom=_APPARENT_HORIZON_OUTER_SCAN_POINTS,
     )
     if radii.size == 0:
         return r_hi
@@ -631,7 +817,7 @@ def solve_apparent_outer_horizon(
     lo = float(radii[last_idx])
     hi = float(radii[last_idx + 1])
 
-    for _ in range(48):
+    for _ in range(_APPARENT_HORIZON_OUTER_BISECT_ITERATIONS):
         mid = 0.5 * (lo + hi)
         if _g_scalar(
             mid, M_bh_kg, matter_state, laser_state, scale_factor, lambda_const,
@@ -639,7 +825,7 @@ def solve_apparent_outer_horizon(
             hi = mid
         else:
             lo = mid
-        if hi - lo <= 1e-9 * max(hi, 1.0):
+        if hi - lo <= _APPARENT_HORIZON_OUTER_REL_TOL * max(hi, 1.0):
             break
 
     return float(hi)

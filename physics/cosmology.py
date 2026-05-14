@@ -76,8 +76,15 @@ class LambdaCDM:
         self._event_interpolator = None
         self._particle_interp_used = 0
         self._event_interp_used = 0
+        # ОПТИМИЗАЦИЯ: интерполятор a(t) из того же JSON-кэша. Подменяет
+        # scipy.solve_ivp в _get_scale_factor_for_time для произвольных t
+        # (например, t_future у compute_ltb_event_horizon). См.
+        # _load_precomputed_horizons.
+        self._scale_factor_interpolator = None
+        self._horizon_time_min = None
+        self._horizon_time_max = None
         self._load_precomputed_horizons()
-        
+
         # ОПТИМИЗАЦИЯ: Кэш для scale_factor по времени
         self._scale_factor_cache_time = -1.0
         self._scale_factor_cache_value = 1.0
@@ -87,16 +94,37 @@ class LambdaCDM:
         self._eh_ltb_cache_value = 0.0
     
     def _get_scale_factor_for_time(self, time: float) -> float:
-        """Получить scale_factor для времени с кэшированием"""
-        # Если время совпадает с кэшированным, возвращаем кэш
+        """Получить a(t) с кэшированием.
+
+        Иерархия путей:
+          1. Точечный кэш последнего вызова (O(1), пока |t − t_cached| < 1 Myr).
+          2. Предвычисленный интерполятор a(t) из `data/event_horizon_cache.json`
+             — np.interp на 150k-узловой сетке (~1 мкс/вызов). Та же «обычная»
+             ΛCDM-эволюция, что и `calculate_scale_factor_at_time`, только
+             посчитанная один раз скриптом precompute_horizons на сетке 1 Myr.
+             Относительная точность ~1e-9, чего c запасом достаточно для всех
+             потребителей (в т.ч. `compute_ltb_event_horizon` с rtol=1e-4).
+          3. Численный `calculate_scale_factor_at_time` (scipy.solve_ivp от t=0)
+             — резерв, если JSON-кэш не загружен или t вне его диапазона.
+        """
         if abs(time - self._scale_factor_cache_time) < _SCALE_FACTOR_CACHE_TOLERANCE_SECONDS:
             return self._scale_factor_cache_value
-        
-        # Иначе вычисляем и кэшируем
+
+        if (
+            self._scale_factor_interpolator is not None
+            and self._horizon_time_min is not None
+            and self._horizon_time_max is not None
+            and self._horizon_time_min <= time <= self._horizon_time_max
+        ):
+            a = float(self._scale_factor_interpolator(time))
+            self._scale_factor_cache_time = time
+            self._scale_factor_cache_value = a
+            return a
+
         BILLION_YEARS_IN_SECONDS = 3.154e16
         time_years = time / BILLION_YEARS_IN_SECONDS * 1e9
         a = calculate_scale_factor_at_time(time_years)
-        
+
         self._scale_factor_cache_time = time
         self._scale_factor_cache_value = a
         return a
@@ -171,6 +199,28 @@ class LambdaCDM:
                 self._event_interpolator = interp1d(times_seconds_event, event_horizons,
                                                      kind='linear', bounds_error=False,
                                                      fill_value=(event_horizons[0], event_horizons[-1]))
+
+                # ОПТИМИЗАЦИЯ: тот же JSON уже хранит `scale_factors` (см.
+                # scripts/precompute_horizons.py: scale_factors.append(
+                # calculate_scale_factor_at_time(...))). Поднимаем их как
+                # интерполятор a(t) — нужен для compute_ltb_event_horizon,
+                # чтобы не интегрировать ΛCDM-фон scipy.solve_ivp в каждом
+                # кадре (~130 мс). Это та же «обычная» ΛCDM-эволюция, что
+                # и calculate_scale_factor_at_time, только посчитанная один
+                # раз скриптом предвычисления.
+                if 'scale_factors' in event_data:
+                    scale_factors_arr = np.array(event_data['scale_factors'])
+                    if len(scale_factors_arr) == len(times_seconds_event):
+                        self._scale_factor_interpolator = interp1d(
+                            times_seconds_event,
+                            scale_factors_arr,
+                            kind='linear',
+                            bounds_error=False,
+                            fill_value=(float(scale_factors_arr[0]),
+                                        float(scale_factors_arr[-1])),
+                        )
+                        self._horizon_time_min = float(times_seconds_event[0])
+                        self._horizon_time_max = float(times_seconds_event[-1])
                 interp_time_event = time.perf_counter() - interp_start
                 
                 if not _logged_event_horizon_loaded_ok:
@@ -309,15 +359,16 @@ class LambdaCDM:
             avg_inv_a = 0.5 * (1.0/old_scale_factor + 1.0/self.scale_factor)
             self._particle_integral_accumulated += dt * avg_inv_a
         
-        # ОПТИМИЗАЦИЯ: синхронизируем кэш _get_scale_factor_for_time с новым
-        # состоянием. update_scale_factor RK4-проинтегрировал scale_factor на dt,
-        # поэтому после вызова кэш можно считать актуальным на t_old + dt.
-        # Без этого hubble_parameter(t)/hubble_horizon(t) каждый кадр уходил
-        # в полную solve_ivp от t=0 (~5 мс на вызов) — доминирующая стоимость
-        # горячего пути calculate_masses при бьющем cache miss.
-        if self._scale_factor_cache_time >= 0:
-            self._scale_factor_cache_time += float(dt)
-            self._scale_factor_cache_value = self.scale_factor
+        # ВАЖНО: НЕ обновляем здесь _scale_factor_cache_(time|value). Кэш — это
+        # «последний запрошенный t → a(t)», и compute_ltb_event_horizon забивает
+        # его произвольными t (например, t_future = t_now + 100 Гyr). Слепое
+        # «cache_time += dt; cache_value = self.scale_factor» создавало
+        # некорректную пару (≈t_future, a_now) — следующий вызов
+        # _get_scale_factor_for_time(t_future_new) попадал в этот фейковый хит
+        # и возвращал a_now вместо a_future. На космологическом event horizon
+        # это вызывало нефизичный «прыжок в полтора раза» сразу после старта
+        # лазера. Инвалидируем кэш — все обращения уйдут в interp1d (~1 мкс).
+        self._scale_factor_cache_time = -1.0
     
     def comoving_to_physical(self, comoving_position: np.ndarray) -> np.ndarray:
         """Преобразовать сопутствующие координаты в физические"""
@@ -570,7 +621,10 @@ class LambdaCDM:
             h = self.h0 * np.sqrt(omega_m / (a_val**3) + self.omega_lambda)
             return a_val * h
 
-        t_future = time + 1000.0 * 365.25 * 24 * 3600 * 1e9
+        t_future = (
+            time
+            + float(config.MAX_TIME_YEARS) * SECONDS_PER_YEAR
+        )
 
         sol_future = None
         try:
@@ -622,16 +676,14 @@ class LambdaCDM:
         (t_max, r_SdS_outer·(1-ε)) до (time_now, r_e_today) одним прогоном
         ODE. Это в ~10 раз быстрее, чем бисекция, и даёт точное значение.
         """
-        SECONDS_PER_YEAR = 365.25 * 24 * 3600
         omega_m = self.omega_dm + self.omega_b
         lam = 3.0 * (self.h0 ** 2) * self.omega_lambda / (c * c)
         rho_crit = self.rho_crit
         a_now = self._get_scale_factor_for_time(time_now)
 
-        # t_max берём заведомо в глубокой Λ-эпохе: за 100 Gyr матерь
-        # разредится в e^(21) ≈ 10^9 раз относительно сегодня, геометрия
-        # практически SdS.
-        t_max = time_now + 100.0 * 1e9 * SECONDS_PER_YEAR
+        # t_max берём заведомо в глубокой Λ-эпохе; длина совпадает с
+        # config.MAX_TIME_YEARS.
+        t_max = time_now + float(config.MAX_TIME_YEARS) * SECONDS_PER_YEAR
 
         def da_dt(t, a_val):
             a_p = max(float(a_val[0]), 1e-30)

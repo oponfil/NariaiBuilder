@@ -19,8 +19,8 @@ from utils.constants import NARIAI_BLACK_HOLE_MASS_KG, SECONDS_PER_YEAR
 from utils.cosmology_utils import calculate_scale_factor_at_time
 
 
-# По умолчанию мы ждём, пока ЦЧД дорастёт до предела Нариаи, не более 100 млрд лет.
-DEFAULT_MAX_WAIT_YEARS = 100.0e9
+# По умолчанию ждём не дольше config.MAX_TIME_YEARS (годы после старта лазера).
+DEFAULT_MAX_WAIT_YEARS = float(config.MAX_TIME_YEARS)
 # Шаг физики headless-симуляции (10 млн лет).
 DEFAULT_DT_YEARS = 1.0e6
 # Как часто (в шагах) проверять условие ранней остановки симуляции.

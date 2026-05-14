@@ -9,9 +9,13 @@ MAX_FPS = 100  # Максимальная частота кадров (pygame.cl
 # Шаг времени симуляции (в годах)
 DT_YEARS = 10.e6  # 10 млн лет (по умолчанию; профиль может перезаписать)
 # Начальное космологическое время (в годах от Большого взрыва)
-INITIAL_TIME_YEARS = 0.01e9  # 10 млн лет
+INITIAL_TIME_YEARS = 1.01e9  # 10 млн лет
+# Единый масштаб времени (годы): верхний предел live-симуляции, сетка
+# предрасчёта data/*_horizon_cache.json, длина «будущего» для интегралов
+# LTB/FLRW event horizon и таймаут headless-скриптов после старта лазера.
+MAX_TIME_YEARS = 100e9
 # Время старта лезера (в годах): лазерная подпитка ЦЧД + гравитация точек к центральной ЧД
-LASER_START_TIME_YEARS = 0.12e9  # 13.8 млрд лет
+LASER_START_TIME_YEARS = 1.0e9  # 13.8 млрд лет
 
 
 # =============================================================================
@@ -49,22 +53,33 @@ MATTER_SEED = 42
 # из полной M(<r); значение сохранено как переключатель сценариев/совместимости.
 # "event" - LTB causal boundary для эмиттеров
 # "hubble" - LTB Hubble/outer apparent boundary
-EMISSION_BOUNDARY = "event"  # "event" | "hubble"
+# "desitter" - пустой de Sitter reference horizon (c / H_Λ = √(3/Λ))
+EMISSION_BOUNDARY = "desitter"  #  "hubble" | "event" | "desitter"
 
 # Ограничивать ли суммарную мощность всех эмиттеров мощностью Планка?
 # Если True, MATTER_THRUST_POWER_PER_KG_W игнорируется, и общая мощность
 # жестко фиксируется на уровне PLANCK_POWER_W, распределяясь равномерно.
 LIMIT_TOTAL_POWER_TO_PLANCK = False  # True | False
 
+# Упрощенный быстрый режим масс/горизонтов: учитываем только центральную ЧД
+# (без вклада дискретной материи и фотонов в полете в M(<r)).
+# Сильно ускоряет ltb_horizons_masses, но физически упрощает сценарий.
+SIMPLIFIED_MASSES_BH_ONLY = True  # True | False
+
 # P = MATTER_THRUST_POWER_PER_KG_W · m_rest (Вт);
 # F = P/c, a_thrust = P/(c·m), dm/dt = −(Вт/кг)·m/c², dM_bh = (P·dt/c²)·a/a_emit, a_grav = G·M_BH/r².
 # Для сравнения: предел Эддингтора — порядка 6.3 Вт/кг (ионизованный H, Томсон).
 # 0 — лазер выключен.
-MATTER_THRUST_POWER_PER_KG_W = 4.17e0
+MATTER_THRUST_POWER_PER_KG_W = 4.17e1
 # Эмиттеры выбираются автоматически: точки с χ < χ_event(t_collapse), где
 # χ_event — комовинг-радиус cosmological EMISSION_BOUNDARY horizon в момент включения лазера.
 # Маркер лазерного фотона (px) (размер/диаметр); цвет — visualization.renderer
 MATTER_LASER_PHOTON_SIZE_PX = 2
+# Маркеры: не рисуем пакеты с (a_emit/a_now) < порога. Строка «Photon m:»: цвет
+# и нижняя «планка» массы/процента в HUD относятся к этой же космологической доле —
+# при упоре в пол процент ≈ 100×порог (без отдельного множителя √f у эмиттера). 0 — выкл.
+MATTER_LASER_PHOTON_DRAW_MIN_REMAINING_FRACTION = 0.001
+
 # Доля первоначальной массы, которая остается после полного выгорания лазера
 MATTER_LASER_REMAINING_FRACTION = 1e-4
 

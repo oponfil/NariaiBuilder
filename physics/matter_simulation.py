@@ -28,6 +28,7 @@ from utils.config_utils import (
 from utils.constants import (
     BILLION_LIGHT_YEARS_IN_METERS,
     CAUSAL_HORIZON_COMOVING_METERS,
+    G,
     PARTICLE_HORIZON_MASS_LIMIT_KG,
     SECONDS_PER_YEAR,
     c,
@@ -50,6 +51,10 @@ class MatterSimulation:
         self._initial_horizon_comoving = 0.0
         # solve_apparent_* внутри _capture_inside_apparent_inner_horizon за последний кадр
         self._last_capture_ltb_horizons_seconds = 0.0
+        # compute_ltb_event_horizon из _emission_boundary_radius (вызывается в начале
+        # update_collapse перед update_positions_and_velocities). Раньше его время
+        # сидело в общем `step_matter_other` и доминировало над всем остальным.
+        self._last_emission_boundary_seconds = 0.0
     
     def generate_points_in_3d_sphere(self, num_points: int, radius: float, seed: int = None) -> np.ndarray:
         """
@@ -369,7 +374,10 @@ class MatterSimulation:
 
         # ОПТИМИЗАЦИЯ: синхронизируем кэши норм скоростей и версии массива масс
         # (используются MassCalculator для пропуска γ-коррекции и кэша m_eff).
-        self.matter_points._recompute_velocity_norms()
+        # scale_factor нужен γ-коррекции, чтобы привязаться к a момента инита.
+        self.matter_points._recompute_velocity_norms(
+            scale_factor=cosmology.scale_factor,
+        )
         self.matter_points._bump_masses_version()
         
         r_emission_boundary = self._emission_boundary_radius(universe, cosmology)
@@ -558,6 +566,7 @@ class MatterSimulation:
             radius = compute_ltb_event_horizon(
                 time_seconds, M_bh, matter_state, laser_state,
                 scale_factor, lam, r_hubble,
+                a_at_seconds=cosmology._get_scale_factor_for_time,
             )
             if np.isfinite(radius) and radius > 0.0:
                 if cache_key is not None:
@@ -571,11 +580,23 @@ class MatterSimulation:
         return self._ltb_hubble_horizon(time_seconds, cosmology)
 
     def _emission_boundary_radius(self, universe, cosmology) -> float:
-        """Физический радиус границы эмиттеров для текущего config.EMISSION_BOUNDARY."""
-        boundary_type = getattr(config, 'EMISSION_BOUNDARY', 'event')
-        if boundary_type == 'hubble':
-            return self._ltb_hubble_horizon(universe.time, cosmology)
-        return self._ltb_event_horizon(universe.time, cosmology)
+        """Физический радиус границы эмиттеров для текущего config.EMISSION_BOUNDARY.
+
+        Время выполнения накапливается в `_last_emission_boundary_seconds` —
+        отдельная статья профиля. Внутри сидит `compute_ltb_event_horizon`
+        (scipy.solve_ivp), на тяжёлых сценариях это десятки мс/кадр.
+        """
+        t0 = time.perf_counter()
+        try:
+            boundary_type = str(getattr(config, 'EMISSION_BOUNDARY', 'event')).strip().lower()
+            if boundary_type == 'hubble':
+                return self._ltb_hubble_horizon(universe.time, cosmology)
+            if boundary_type == 'desitter':
+                # Пустая de Sitter reference-scale: r_dS = c / H_Λ = √(3/Λ).
+                return float(cosmology.de_sitter_horizon(0.0))
+            return self._ltb_event_horizon(universe.time, cosmology)
+        finally:
+            self._last_emission_boundary_seconds += time.perf_counter() - t0
     
     def update_collapse(self, universe, cosmology, paused: bool = False, r_black_hole: float = None,
                        dt_step_signed: float | None = None):
@@ -684,14 +705,23 @@ class MatterSimulation:
 
             # В чистом LTB захват ограничен найденным outer apparent horizon,
             # а не вакуумным SdS/Nariai радиусом.
-            r_lo = 0.0
+            # ВАЖНО: пятым аргументом solve_apparent_inner_horizon ждёт
+            # `r_classical` (Шварцшильд от голой M_BH). Если передать 0,
+            # solver вернёт 0 при любом «нет trapped-зоны на eps»-исходе,
+            # и `_capture_inside_apparent_inner_horizon` досрочно выйдет
+            # пустым, оставив фотоны в зазоре [r_classical, r_AH] невидимо
+            # сидеть внутри отрисованного круга ЦЧД без поглощения. Передаём
+            # настоящий r_classical = 2GM_BH/c² — это и нижняя оценка
+            # горизонта, и сигнал solver'у, что внутри уже есть точечная
+            # ЦЧД с известным trap'ом.
+            r_classical = M_bh * (2.0 * G / (c * c))
             r_hi = float(r_outer_ltb)
             if not np.isfinite(r_hi) or r_hi <= 0.0:
                 self._last_capture_ltb_horizons_seconds = capture_horizons_seconds
                 return
             r_AH = solve_apparent_inner_horizon(
                 M_bh, matter_state, laser_state, a_now,
-                r_lo, r_hi, lam,
+                r_classical, r_hi, lam,
             )
             capture_horizons_seconds += time.perf_counter() - t_h0
             if r_AH <= 0.0 or not np.isfinite(r_AH):
